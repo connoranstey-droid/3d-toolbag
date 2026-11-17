@@ -235,8 +235,7 @@ so undo/redo just swaps mesh snapshots and everything stays in sync.
 1. Baking: normal / displacement / AO maps from high-poly to low-poly (ray cast via the BVH).
 2. Sculpt: multires levels, dynamic topology, layers, alphas/stencils, pen pressure.
 3. Offset Edge Loop, Slide Edge, Poke, Wedge; bevel with chamfer-mitering options; world-space symmetry.
-4. **Sculpting**: multires / dynamic-tessellation brushes (grab, smooth, crease, inflate, clay) on millions of polys, with masks and layers.
-5. UV: optimize (ARAP), straighten shells, texel-density tools, UDIM tiles, image textures.
-6. FBX: creases, multiple UV sets, materials/textures; USD and Alembic.
-7. Python scripting (`cmds`-like) and a Script Editor; customizable hotkeys and shelves.
-8. GPU subdivision via OpenSubdiv for very dense previews.
+4. UV: optimize (ARAP), straighten shells, texel-density tools, UDIM tiles, image textures.
+5. FBX: creases, multiple UV sets, materials/textures; USD and Alembic.
+6. Python scripting (`cmds`-like) and a Script Editor; customizable hotkeys and shelves.
+7. GPU subdivision via OpenSubdiv for very dense previews.
