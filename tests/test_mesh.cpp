@@ -4,6 +4,8 @@
 #include "mesh/ObjIO.h"
 #include "mesh/Primitives.h"
 #include "mesh/Subdivision.h"
+#include "mesh/UVOps.h"
+#include "mesh/BVH.h"
 
 #include <chrono>
 #include <cstdio>
@@ -13,6 +15,7 @@
 #include <vector>
 
 using namespace facet;
+using ops::IndexList;
 
 static int g_fail = 0;
 #define CHECK(cond)                                                                    \
@@ -260,6 +263,192 @@ static void testObj()
     CHECK_EQ(in[1].mesh.numVerts(), out[1].mesh.numVerts());
 }
 
+static bool uvValid(const Mesh& m)
+{
+    if (!m.hasUVs()) return false;
+    for (uint32_t u : m.faceUVs)
+        if (u >= m.uvs.size()) return false;
+    return true;
+}
+
+static void testUVsThroughOps()
+{
+    Mesh c = prim::cube();
+    CHECK(uvValid(c));
+    CHECK_EQ(c.uvs.size(), size_t(14)); // Maya's cube has 14 uvs
+    ops::extrudeFaces(c, {0}, true, 0.3f);
+    CHECK(uvValid(c));
+    auto plan = ops::planEdgeLoop(c, 0, 0.5f);
+    ops::insertEdgeLoop(c, plan);
+    CHECK(uvValid(c));
+    ops::deleteFaces(c, {1});
+    ops::fillHoles(c);
+    CHECK(uvValid(c));
+    ops::triangulate(c);
+    CHECK(uvValid(c));
+    Mesh s1 = subdivide(prim::sphere(1, 8, 6), 2);
+    CHECK(uvValid(s1));
+    // Subdivided plane keeps a single connected UV grid: (2*4+1)^2 uvs for a 2x2 plane at level 2.
+    Mesh p = subdivide(prim::plane(1, 1, 2, 2), 2);
+    CHECK_EQ(p.uvs.size(), size_t(81));
+    // OBJ keeps uvs.
+    std::vector<NamedMesh> out{{"box", prim::cube(), Mat4()}};
+    writeObj("/tmp/facet_uv.obj", out);
+    std::vector<NamedMesh> in;
+    readObj("/tmp/facet_uv.obj", in);
+    CHECK(in.size() == 1 && uvValid(in[0].mesh) && in[0].mesh.uvs.size() == 14);
+}
+
+static void testBevel()
+{
+    // Single cube edge, one segment: +1 strip face, end faces gain a vertex (no caps).
+    Mesh c = prim::cube();
+    uint32_t e = 0;
+    auto f = ops::bevelEdges(c, {e}, {0.1f, 1, false});
+    CHECK_EQ(c.numFaces(), 7u); CHECK_EQ(c.numVerts(), 10u); CHECK(manifoldClosed(c)); CHECK_EQ(euler(c), 2);
+    CHECK(outwardNormals(c)); CHECK(uvValid(c));
+    // All 12 edges: 6 faces + 12 strips + 8 corner triangles.
+    Mesh all = prim::cube();
+    IndexList es;
+    for (uint32_t i = 0; i < all.numEdges(); ++i) es.push_back(i);
+    ops::bevelEdges(all, es, {0.1f, 1, false});
+    CHECK_EQ(all.numFaces(), 26u); CHECK_EQ(all.numVerts(), 24u); CHECK(manifoldClosed(all)); CHECK_EQ(euler(all), 2);
+    CHECK(outwardNormals(all));
+    // Rounded, 3 segments, all edges.
+    Mesh r = prim::cube();
+    ops::bevelEdges(r, es, {0.15f, 3, true});
+    CHECK(manifoldClosed(r)); CHECK_EQ(euler(r), 2); CHECK(outwardNormals(r));
+    CHECK_EQ(r.numFaces(), 6u + 12u * 3u + 8u);
+    // Edge loop around a cylinder (loop through valence-4 vertices).
+    Mesh cy = prim::cylinder(1, 2, 12, 2, true);
+    uint32_t ring = kInvalid;
+    for (uint32_t i = 0; i < cy.numEdges(); ++i) {
+        auto& ed = cy.edges[i];
+        if (std::abs(cy.positions[ed.v0].y) < 1e-4f && std::abs(cy.positions[ed.v1].y) < 1e-4f) { ring = i; break; }
+    }
+    auto loop = ops::edgeLoop(cy, ring);
+    CHECK_EQ(loop.size(), size_t(12));
+    ops::bevelEdges(cy, loop, {0.2f, 2, true});
+    CHECK(manifoldClosed(cy)); CHECK_EQ(euler(cy), 2); CHECK_EQ(cy.numFaces(), 24u + 2u + 24u);
+    // Cube corner with two bevelled edges.
+    Mesh two = prim::cube();
+    uint32_t v0 = 0;
+    IndexList e2(two.vertexEdges(v0).begin(), two.vertexEdges(v0).begin() + 2);
+    ops::bevelEdges(two, e2, {0.1f, 2, true});
+    CHECK(manifoldClosed(two)); CHECK_EQ(euler(two), 2); CHECK(outwardNormals(two));
+}
+
+static void testBridgeCut()
+{
+    // Two separate planes facing each other -> bridge their borders into a tube.
+    Mesh a = prim::plane(1, 1, 2, 2);
+    Mesh b = prim::plane(1, 1, 2, 2);
+    Mesh m = a;
+    m.append(b, Mat4::translate({0, 2, 0}) * Mat4::rotateX(180));
+    m.buildTopology();
+    IndexList border;
+    for (uint32_t e = 0; e < m.numEdges(); ++e) if (m.isBorderEdge(e)) border.push_back(e);
+    auto made = ops::bridgeEdges(m, border, 2);
+    CHECK_EQ(made.size(), size_t(8 * 3));
+    CHECK(manifoldClosed(m)); CHECK_EQ(euler(m), 2);
+    // Bridge faces: two opposite cube faces -> through-hole (genus 1).
+    Mesh c = prim::cube(1, 1, 1, 3, 3, 3);
+    uint32_t fz = kInvalid, fnz = kInvalid;
+    for (uint32_t f = 0; f < c.numFaces(); ++f) {
+        Vec3 ctr = c.faceCenter(f), n = c.faceNormal(f);
+        if (std::abs(ctr.x) < 0.01f && std::abs(ctr.y) < 0.01f && n.z > 0.9f) fz = f;
+        if (std::abs(ctr.x) < 0.01f && std::abs(ctr.y) < 0.01f && n.z < -0.9f) fnz = f;
+    }
+    ops::bridgeFaces(c, {fz, fnz}, 1);
+    CHECK(manifoldClosed(c)); CHECK_EQ(euler(c), 0);
+    // Multi-cut across a quad: edge midpoint to opposite edge midpoint.
+    Mesh q = prim::plane(1, 1, 1, 1);
+    auto& e0 = q.edges[0];
+    uint32_t opp = kInvalid;
+    for (uint32_t e = 1; e < q.numEdges(); ++e)
+        if (q.edges[e].v0 != e0.v0 && q.edges[e].v0 != e0.v1 && q.edges[e].v1 != e0.v0 && q.edges[e].v1 != e0.v1) opp = e;
+    auto cut = ops::multiCut(q, {{e0.v0, e0.v1, 0.5f}, {q.edges[opp].v0, q.edges[opp].v1, 0.5f}});
+    CHECK_EQ(cut.size(), size_t(1)); CHECK_EQ(q.numFaces(), 2u); CHECK_EQ(q.numVerts(), 6u);
+    CHECK(uvValid(q));
+    // Corner-to-corner cut (diagonal).
+    Mesh d = prim::plane(1, 1, 1, 1);
+    CHECK(ops::splitFace(d, 0, 3) || ops::splitFace(d, 1, 2));
+    CHECK_EQ(d.numFaces(), 2u);
+    // Target weld.
+    Mesh w = prim::plane(1, 1, 2, 1);
+    ops::mergeInto(w, 0, 1);
+    CHECK_EQ(w.numVerts(), 5u);
+}
+
+static void testUVTools()
+{
+    // Cylinder: cylindrical projection then unfold keeps it unflipped.
+    Mesh cy = prim::cylinder(1, 2, 16, 4, false);
+    uv::cylindrical(cy, {});
+    CHECK(uvValid(cy));
+    CHECK(uv::flippedRatio(cy) < 0.01f);
+    // Cut a vertical seam on a closed sphere's hemisphere -> one shell, unfold flat without flips.
+    Mesh s = prim::sphere(1, 24, 12);
+    // Keep the top half: delete faces below the equator.
+    IndexList lower;
+    for (uint32_t f = 0; f < s.numFaces(); ++f) if (s.faceCenter(f).y < 0) lower.push_back(f);
+    ops::deleteFaces(s, lower);
+    uv::planar(s, {}, uv::Axis::Y);
+    uint32_t shells = 0;
+    uv::shellIds(s, &shells);
+    CHECK_EQ(shells, 1u);
+    int solved = uv::unfold(s);
+    CHECK_EQ(solved, 1);
+    std::printf("  hemisphere LSCM flipped ratio %.3f\n", uv::flippedRatio(s));
+    CHECK(uv::flippedRatio(s) < 0.01f);
+    // Area roughly preserved (hemisphere area = 2*pi).
+    float a2 = 0;
+    for (uint32_t f = 0; f < s.numFaces(); ++f)
+        for (uint32_t i = 1; i + 1 < s.faceSize(f); ++i) {
+            uint32_t b = s.faceStart[f];
+            a2 += 0.5f * std::abs(cross2(s.cornerUV(b + i) - s.cornerUV(b), s.cornerUV(b + i + 1) - s.cornerUV(b)));
+        }
+    CHECK(std::abs(a2 - 2 * kPi) / (2 * kPi) < 0.1f);
+    // Cut seams: cube -> cut every edge => 6 shells; sew one edge back => 5.
+    Mesh c = prim::cube();
+    IndexList all;
+    for (uint32_t e = 0; e < c.numEdges(); ++e) all.push_back(e);
+    uv::cutEdges(c, all);
+    uv::shellIds(c, &shells);
+    CHECK_EQ(shells, 6u);
+    CHECK_EQ(c.uvs.size(), size_t(24));
+    uv::sewEdges(c, {0});
+    uv::shellIds(c, &shells);
+    CHECK_EQ(shells, 5u);
+    // Layout packs into 0..1 without overlap of shell boxes.
+    uv::layout(c);
+    for (const Vec2& t : c.uvs) CHECK(t.x >= -1e-4f && t.x <= 1.0001f && t.y >= -1e-4f && t.y <= 1.0001f);
+    // Automatic mapping of a torus: no flips, inside 0..1.
+    Mesh t = prim::torus();
+    uv::automatic(t, {});
+    CHECK(uvValid(t));
+    for (const Vec2& q : t.uvs) CHECK(q.x >= -1e-4f && q.x <= 1.0001f && q.y >= -1e-4f && q.y <= 1.0001f);
+    // Spherical projection valid.
+    Mesh sp = prim::sphere();
+    uv::spherical(sp, {});
+    CHECK(uvValid(sp) && uv::flippedRatio(sp) < 0.05f);
+}
+
+static void testBVH()
+{
+    Mesh s = prim::sphere(2, 64, 32);
+    TriBVH bvh;
+    bvh.build(s);
+    auto h = bvh.raycast({{0, 0, 10}, {0, 0, -1}});
+    CHECK(h.hit && std::abs(h.point.z - 2.0f) < 0.02f);
+    auto miss = bvh.raycast({{5, 5, 10}, {0, 0, -1}});
+    CHECK(!miss.hit);
+    auto c = bvh.closest({0, 5, 0});
+    CHECK(c.hit && std::abs(c.point.y - 2.0f) < 0.02f && std::abs(c.t - 3.0f) < 0.02f);
+    auto c2 = bvh.closest({0.3f, 0.2f, 0.1f});
+    CHECK(c2.hit && std::abs(length(c2.point) - 2.0f) < 0.02f);
+}
+
 static void testPerformance()
 {
     // A dense cage: ~100k quads to 1.6M quads at level 2.
@@ -285,7 +474,9 @@ int main()
     std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"primitives", testPrimitives}, {"subdivision", testSubdivision}, {"extrude", testExtrude},
         {"loops", testLoops}, {"delete/merge", testDeleteMerge}, {"mirror/separate", testMirrorSeparate},
-        {"convert/grow", testConvertGrow}, {"obj", testObj}, {"performance", testPerformance}};
+        {"convert/grow", testConvertGrow}, {"obj", testObj}, {"uvs through ops", testUVsThroughOps},
+        {"bevel", testBevel}, {"bridge/multicut/weld", testBridgeCut},
+        {"uv tools", testUVTools}, {"bvh", testBVH}, {"performance", testPerformance}};
     for (auto& [name, fn] : tests) {
         int before = g_fail;
         fn();

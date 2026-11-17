@@ -40,6 +40,28 @@ QString selectEdgeRing(Scene& s);
 QString convertSelection(Scene& s, SelectMode to);
 QString setComponentMode(Scene& s, SelectMode m);
 
+// New modeling tools
+QString bevel(Scene& s, float offset, int segments, bool round);
+QString bridge(Scene& s, int divisions);
+
+// UVs
+enum class Projection { PlanarX, PlanarY, PlanarZ, PlanarBest, Cylindrical, Spherical, Automatic };
+QString projectUVs(Scene& s, Projection p);
+QString cutUVs(Scene& s);
+QString sewUVs(Scene& s);
+QString unfoldUVs(Scene& s);
+QString layoutUVs(Scene& s);
+QString normalizeUVs(Scene& s);
+QString flipUVs(Scene& s, bool horizontal);
+QString rotateUVs(Scene& s, float degrees);
+
+// Retopology
+QString toggleLive(Scene& s);
+QString conform(Scene& s);
+
+QString importFbx(Scene& s, const QString& path);
+QString exportFbx(Scene& s, const QString& path, bool selectedOnly);
+QString importFile(Scene& s, const QString& path); // by extension (.obj / .fbx)
 QString importObj(Scene& s, const QString& path);
 QString exportObj(Scene& s, const QString& path, bool selectedOnly);
 

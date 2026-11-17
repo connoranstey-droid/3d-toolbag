@@ -23,6 +23,7 @@ void subdivideTopology(const Mesh& p, Mesh& c)
     });
     c.faceStart[0] = 0;
     c.buildTopology();
+    subdivideUVs(p, c);
 
     // Semi-sharp creases lose one unit of sharpness per level (Pixar / OpenSubdiv rule).
     if (p.hasCreases()) {
@@ -35,6 +36,36 @@ void subdivideTopology(const Mesh& p, Mesh& c)
             c.setCrease(V + e, p.edges[e].v1, cs);
         }
     }
+}
+
+void subdivideUVs(const Mesh& p, Mesh& c)
+{
+    if (!p.hasUVs()) { c.uvs.clear(); c.faceUVs.clear(); return; }
+    const uint32_t H = p.numHalfEdges();
+    std::vector<uint32_t> euv(H, kInvalid);
+    c.uvs = p.uvs; // vertex corners keep their uv (linear rule)
+    for (uint32_t h = 0; h < H; ++h) {
+        uint32_t t = p.heTwin[h];
+        bool shared = t != kInvalid && p.faceUVs[h] == p.faceUVs[p.heNext(t)] && p.faceUVs[p.heNext(h)] == p.faceUVs[t];
+        if (shared && euv[t] != kInvalid) { euv[h] = euv[t]; continue; }
+        euv[h] = uint32_t(c.uvs.size());
+        c.uvs.push_back((p.cornerUV(h) + p.cornerUV(p.heNext(h))) * 0.5f);
+    }
+    const uint32_t fBase = uint32_t(c.uvs.size());
+    for (uint32_t f = 0; f < p.numFaces(); ++f) {
+        Vec2 a;
+        for (uint32_t h = p.faceStart[f]; h < p.faceStart[f + 1]; ++h) a += p.cornerUV(h);
+        c.uvs.push_back(a / float(p.faceSize(f)));
+    }
+    c.faceUVs.resize(size_t(H) * 4);
+    for (uint32_t h = 0; h < H; ++h) {
+        uint32_t* q = &c.faceUVs[size_t(h) * 4];
+        q[0] = p.faceUVs[h];
+        q[1] = euv[h];
+        q[2] = fBase + p.heFace[h];
+        q[3] = euv[p.hePrev(h)];
+    }
+    c.touchUVs();
 }
 
 void subdividePositions(const Mesh& p, Mesh& c)
@@ -136,6 +167,15 @@ const Mesh& SubdivSurface::evaluate(const Mesh& cage, int levels)
         topoId_ = cage.topologyId;
         levelCount_ = levels;
         posId_ = 0;
+        uvId_ = cage.uvId;
+    }
+    if (cage.uvId != uvId_) {
+        const Mesh* parent = &cage;
+        for (int l = 0; l < levels; ++l) {
+            subdivideUVs(*parent, levels_[l]);
+            parent = &levels_[l];
+        }
+        uvId_ = cage.uvId;
     }
     if (cage.positionId != posId_) {
         const Mesh* parent = &cage;

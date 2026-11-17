@@ -33,29 +33,41 @@ std::vector<uint8_t> flags(size_t n, const IndexList& items)
     return f;
 }
 
+// Per-vertex uv value taken from any corner (for faces created around existing vertices).
+std::vector<Vec2> anyCornerUV(const Mesh& m)
+{
+    std::vector<Vec2> out(m.numVerts());
+    if (!m.hasUVs()) return out;
+    for (uint32_t h = 0; h < m.numHalfEdges(); ++h) out[m.faceVerts[h]] = m.uvs[m.faceUVs[h]];
+    return out;
+}
+
 // Rewrites every face through `remap`, removing repeated consecutive vertices and degenerate faces.
 void remapFacesAndClean(Mesh& m, const std::vector<uint32_t>& remap)
 {
-    std::vector<uint32_t> newStart{0}, newVerts;
+    const bool uv = m.hasUVs();
+    std::vector<uint32_t> newStart{0}, newVerts, newUV;
     newVerts.reserve(m.faceVerts.size());
-    std::vector<uint32_t> poly;
+    std::vector<std::pair<uint32_t, uint32_t>> poly;
     for (uint32_t f = 0; f < m.numFaces(); ++f) {
         poly.clear();
-        for (uint32_t v : m.faceVertices(f)) {
-            uint32_t r = remap[v];
-            if (poly.empty() || poly.back() != r) poly.push_back(r);
+        for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h) {
+            uint32_t r = remap[m.faceVerts[h]];
+            if (poly.empty() || poly.back().first != r) poly.push_back({r, uv ? m.faceUVs[h] : 0u});
         }
-        while (poly.size() > 1 && poly.front() == poly.back()) poly.pop_back();
+        while (poly.size() > 1 && poly.front().first == poly.back().first) poly.pop_back();
         if (poly.size() < 3) continue;
-        newVerts.insert(newVerts.end(), poly.begin(), poly.end());
+        for (auto [v, u] : poly) { newVerts.push_back(v); if (uv) newUV.push_back(u); }
         newStart.push_back(uint32_t(newVerts.size()));
     }
+    if (uv) m.faceUVs = std::move(newUV);
     // Remap stale edges too so creases survive the rebuild.
     for (auto& e : m.edges)
         if (e.v0 != kInvalid) { e.v0 = remap[e.v0]; e.v1 = remap[e.v1]; }
     m.faceStart = std::move(newStart);
     m.faceVerts = std::move(newVerts);
     m.removeUnusedVertices();
+    if (uv) m.weldUVs();
     m.buildTopology();
 }
 
@@ -125,7 +137,17 @@ IndexList extrudeFaces(Mesh& m, const IndexList& faces, bool keepTogether, float
         for (uint32_t v = 0; v < m.numVerts(); ++v)
             if (isCap[v]) m.positions[v] += normalize(capNormal[v]) * offset;
     }
-    for (size_t i = 0; i < sideFaces.size(); i += 4) m.addFace({sideFaces[i], sideFaces[i + 1], sideFaces[i + 2], sideFaces[i + 3]});
+    if (m.hasUVs()) {
+        const auto any = anyCornerUV(m);
+        for (size_t i = 0; i < sideFaces.size(); i += 4) {
+            const uint32_t q[4] = {sideFaces[i], sideFaces[i + 1], sideFaces[i + 2], sideFaces[i + 3]};
+            const Vec2 u[4] = {any[q[0]], any[q[1]], any[q[2]], any[q[3]]};
+            m.addFaceWithUVs(q, u);
+        }
+        m.weldUVs();
+    } else {
+        for (size_t i = 0; i < sideFaces.size(); i += 4) m.addFace({sideFaces[i], sideFaces[i + 1], sideFaces[i + 2], sideFaces[i + 3]});
+    }
     m.buildTopology();
     return faces;
 }
@@ -133,15 +155,19 @@ IndexList extrudeFaces(Mesh& m, const IndexList& faces, bool keepTogether, float
 void deleteFaces(Mesh& m, const IndexList& faces)
 {
     const auto sel = flags(m.numFaces(), faces);
-    std::vector<uint32_t> ns{0}, nv;
+    const bool uv = m.hasUVs();
+    std::vector<uint32_t> ns{0}, nv, nu;
     for (uint32_t f = 0; f < m.numFaces(); ++f) {
         if (sel[f]) continue;
-        auto fv = m.faceVertices(f);
-        nv.insert(nv.end(), fv.begin(), fv.end());
+        for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h) {
+            nv.push_back(m.faceVerts[h]);
+            if (uv) nu.push_back(m.faceUVs[h]);
+        }
         ns.push_back(uint32_t(nv.size()));
     }
     m.faceStart = std::move(ns);
     m.faceVerts = std::move(nv);
+    if (uv) { m.faceUVs = std::move(nu); m.compactUVs(); }
     m.removeUnusedVertices();
     m.buildTopology();
 }
@@ -167,15 +193,21 @@ bool dissolveEdges(Mesh& m, const IndexList& edgeList, bool removeWinged)
     std::vector<uint32_t> regionSize(F, 0);
     for (uint32_t f = 0; f < F; ++f) regionSize[uf.find(f)]++;
 
-    std::vector<uint32_t> ns{0}, nv;
+    const bool uv = m.hasUVs();
+    std::vector<uint32_t> ns{0}, nv, nu;
+    auto emitFace = [&](uint32_t f) {
+        for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h) {
+            nv.push_back(m.faceVerts[h]);
+            if (uv) nu.push_back(m.faceUVs[h]);
+        }
+        ns.push_back(uint32_t(nv.size()));
+    };
     std::vector<uint8_t> emitted(F, 0);
     std::vector<uint8_t> heUsed(m.numHalfEdges(), 0);
     for (uint32_t f = 0; f < F; ++f) {
         uint32_t root = uf.find(f);
         if (regionSize[root] == 1) {
-            auto fv = m.faceVertices(f);
-            nv.insert(nv.end(), fv.begin(), fv.end());
-            ns.push_back(uint32_t(nv.size()));
+            emitFace(f);
             continue;
         }
         if (emitted[root]) continue;
@@ -184,7 +216,7 @@ bool dissolveEdges(Mesh& m, const IndexList& edgeList, bool removeWinged)
         std::vector<uint32_t> regionFaces;
         for (uint32_t g = f; g < F; ++g)
             if (uf.find(g) == root) regionFaces.push_back(g);
-        std::vector<std::vector<uint32_t>> loops;
+        std::vector<std::vector<uint32_t>> loops; // loops of corner (half-edge) ids
         bool ok = true;
         for (uint32_t rf : regionFaces) {
             for (uint32_t h = m.faceStart[rf]; h < m.faceStart[rf + 1] && ok; ++h) {
@@ -194,7 +226,7 @@ bool dissolveEdges(Mesh& m, const IndexList& edgeList, bool removeWinged)
                 size_t guard = 0;
                 do {
                     heUsed[cur] = 1;
-                    loop.push_back(m.heFrom(cur));
+                    loop.push_back(cur);
                     uint32_t g = m.heNext(cur);
                     size_t spin = 0;
                     while (dissolved[m.heEdge[g]]) {
@@ -208,18 +240,18 @@ bool dissolveEdges(Mesh& m, const IndexList& edgeList, bool removeWinged)
             }
         }
         if (ok && loops.size() == 1 && loops[0].size() >= 3) {
-            nv.insert(nv.end(), loops[0].begin(), loops[0].end());
+            for (uint32_t h : loops[0]) {
+                nv.push_back(m.faceVerts[h]);
+                if (uv) nu.push_back(m.faceUVs[h]);
+            }
             ns.push_back(uint32_t(nv.size()));
         } else {
-            for (uint32_t rf : regionFaces) {
-                auto fv = m.faceVertices(rf);
-                nv.insert(nv.end(), fv.begin(), fv.end());
-                ns.push_back(uint32_t(nv.size()));
-            }
+            for (uint32_t rf : regionFaces) emitFace(rf);
         }
     }
     m.faceStart = std::move(ns);
     m.faceVerts = std::move(nv);
+    if (uv) m.faceUVs = std::move(nu);
     std::vector<uint32_t> remap;
     m.removeUnusedVertices(&remap);
     m.buildTopology();
@@ -234,21 +266,25 @@ bool dissolveEdges(Mesh& m, const IndexList& edgeList, bool removeWinged)
             if (m.vertexEdges(v).size() == 2) { drop[v] = 1; any = true; }
         }
         if (any) {
-            std::vector<uint32_t> ns2{0}, nv2;
+            std::vector<uint32_t> ns2{0}, nv2, nu2;
             for (uint32_t f = 0; f < m.numFaces(); ++f) {
-                auto fv = m.faceVertices(f);
                 uint32_t keep = 0;
-                for (uint32_t v : fv) keep += drop[v] ? 0 : 1;
-                for (uint32_t v : fv)
-                    if (!drop[v] || keep < 3) nv2.push_back(v);
+                for (uint32_t v : m.faceVertices(f)) keep += drop[v] ? 0 : 1;
+                for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h)
+                    if (!drop[m.faceVerts[h]] || keep < 3) {
+                        nv2.push_back(m.faceVerts[h]);
+                        if (uv) nu2.push_back(m.faceUVs[h]);
+                    }
                 ns2.push_back(uint32_t(nv2.size()));
             }
             m.faceStart = std::move(ns2);
             m.faceVerts = std::move(nv2);
+            if (uv) m.faceUVs = std::move(nu2);
             m.removeUnusedVertices();
             m.buildTopology();
         }
     }
+    if (uv) m.compactUVs();
     return true;
 }
 
@@ -317,6 +353,15 @@ uint32_t mergeByDistance(Mesh& m, const IndexList& verts, float threshold)
     }
     if (removed) remapFacesAndClean(m, remap);
     return removed;
+}
+
+void mergeInto(Mesh& m, uint32_t src, uint32_t dst)
+{
+    if (src == dst || src >= m.numVerts() || dst >= m.numVerts()) return;
+    std::vector<uint32_t> remap(m.numVerts());
+    std::iota(remap.begin(), remap.end(), 0u);
+    remap[src] = dst;
+    remapFacesAndClean(m, remap);
 }
 
 void collapseEdges(Mesh& m, const IndexList& edgeList)
@@ -458,19 +503,34 @@ IndexList insertEdgeLoop(Mesh& m, const EdgeLoopPlan& plan)
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> cutOf;
     for (const auto& c : plan.cuts) cutOf[c.face] = {c.e0, c.e1};
 
-    std::vector<uint32_t> ns{0}, nv;
+    const bool uv = m.hasUVs();
+    std::unordered_map<uint32_t, float> splitT;
+    for (const auto& sp : plan.splits) splitT[sp.edge] = sp.t;
+    std::vector<uint32_t> ns{0}, nv, nu;
     std::vector<std::pair<uint32_t, uint32_t>> newEdges;
-    std::vector<uint32_t> poly;
+    std::vector<uint32_t> poly, polyUV;
     for (uint32_t f = 0; f < m.numFaces(); ++f) {
         poly.clear();
+        polyUV.clear();
         for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h) {
             poly.push_back(m.faceVerts[h]);
-            uint32_t sv = splitVert[m.heEdge[h]];
-            if (sv != kInvalid) poly.push_back(sv);
+            if (uv) polyUV.push_back(m.faceUVs[h]);
+            uint32_t e = m.heEdge[h];
+            uint32_t sv = splitVert[e];
+            if (sv != kInvalid) {
+                poly.push_back(sv);
+                if (uv) {
+                    float t = splitT[e];
+                    if (m.heFrom(h) != m.edges[e].v0) t = 1.0f - t;
+                    polyUV.push_back(uint32_t(m.uvs.size()));
+                    m.uvs.push_back(lerp(m.cornerUV(h), m.cornerUV(m.heNext(h)), t));
+                }
+            }
         }
+        auto emit = [&](size_t k) { nv.push_back(poly[k]); if (uv) nu.push_back(polyUV[k]); };
         auto it = cutOf.find(f);
         if (it == cutOf.end()) {
-            nv.insert(nv.end(), poly.begin(), poly.end());
+            for (size_t k = 0; k < poly.size(); ++k) emit(k);
             ns.push_back(uint32_t(nv.size()));
             continue;
         }
@@ -478,14 +538,15 @@ IndexList insertEdgeLoop(Mesh& m, const EdgeLoopPlan& plan)
         size_t i = std::find(poly.begin(), poly.end(), sa) - poly.begin();
         size_t j = std::find(poly.begin(), poly.end(), sb) - poly.begin();
         const size_t n = poly.size();
-        for (size_t k = i;; k = (k + 1) % n) { nv.push_back(poly[k]); if (k == j) break; }
+        for (size_t k = i;; k = (k + 1) % n) { emit(k); if (k == j) break; }
         ns.push_back(uint32_t(nv.size()));
-        for (size_t k = j;; k = (k + 1) % n) { nv.push_back(poly[k]); if (k == i) break; }
+        for (size_t k = j;; k = (k + 1) % n) { emit(k); if (k == i) break; }
         ns.push_back(uint32_t(nv.size()));
         newEdges.push_back({sa, sb});
     }
     m.faceStart = std::move(ns);
     m.faceVerts = std::move(nv);
+    if (uv) { m.faceUVs = std::move(nu); m.weldUVs(); }
     m.buildTopology();
     for (const auto& c : carry) { m.setCrease(c.a, c.m, c.s); m.setCrease(c.m, c.b, c.s); }
     IndexList out;
@@ -529,10 +590,18 @@ IndexList fillHoles(Mesh& m, const IndexList& borderEdges)
         if (ok && loop.size() >= 3) loops.push_back(std::move(loop));
     }
     IndexList out;
+    const auto any = anyCornerUV(m);
     for (auto& l : loops) {
         std::reverse(l.begin(), l.end());
-        out.push_back(m.addFace(l));
+        if (m.hasUVs()) {
+            std::vector<Vec2> u;
+            for (uint32_t v : l) u.push_back(any[v]);
+            out.push_back(m.addFaceWithUVs(l, u));
+        } else {
+            out.push_back(m.addFace(l));
+        }
     }
+    if (m.hasUVs()) m.weldUVs();
     m.buildTopology();
     return out;
 }
@@ -549,21 +618,24 @@ void reverseFaces(Mesh& m, const IndexList& faces)
 void triangulate(Mesh& m, const IndexList& faces)
 {
     auto sel = faces.empty() ? std::vector<uint8_t>(m.numFaces(), 1) : flags(m.numFaces(), faces);
-    std::vector<uint32_t> ns{0}, nv;
+    const bool uv = m.hasUVs();
+    std::vector<uint32_t> ns{0}, nv, nu;
     for (uint32_t f = 0; f < m.numFaces(); ++f) {
-        auto fv = m.faceVertices(f);
-        if (!sel[f] || fv.size() <= 3) {
-            nv.insert(nv.end(), fv.begin(), fv.end());
+        const uint32_t b = m.faceStart[f], n = m.faceSize(f);
+        auto put = [&](uint32_t h) { nv.push_back(m.faceVerts[h]); if (uv) nu.push_back(m.faceUVs[h]); };
+        if (!sel[f] || n <= 3) {
+            for (uint32_t h = b; h < b + n; ++h) put(h);
             ns.push_back(uint32_t(nv.size()));
             continue;
         }
-        for (size_t i = 1; i + 1 < fv.size(); ++i) {
-            nv.insert(nv.end(), {fv[0], fv[i], fv[i + 1]});
+        for (uint32_t i = 1; i + 1 < n; ++i) {
+            put(b); put(b + i); put(b + i + 1);
             ns.push_back(uint32_t(nv.size()));
         }
     }
     m.faceStart = std::move(ns);
     m.faceVerts = std::move(nv);
+    if (uv) m.faceUVs = std::move(nu);
     m.buildTopology();
 }
 
@@ -579,13 +651,23 @@ void mirror(Mesh& m, int axis, float mergeThreshold)
         p[axis] = -p[axis];
         mirrorOf[v] = m.addVertex(p);
     }
+    const bool uv = m.hasUVs();
+    const uint32_t uvBase = uint32_t(m.uvs.size());
+    if (uv) {
+        std::vector<Vec2> copy = m.uvs; // mirrored half reuses (overlapping) uvs
+        m.uvs.insert(m.uvs.end(), copy.begin(), copy.end());
+    }
     std::vector<uint32_t> poly;
     for (uint32_t f = 0; f < F; ++f) {
         poly.clear();
-        auto fv = m.faceVertices(f);
-        for (auto it = fv.rbegin(); it != fv.rend(); ++it) poly.push_back(mirrorOf[*it]);
-        m.addFace(poly);
+        for (uint32_t h = m.faceStart[f + 1]; h-- > m.faceStart[f];) {
+            poly.push_back(mirrorOf[m.faceVerts[h]]);
+            if (uv) m.faceUVs.push_back(m.faceUVs[h] + uvBase);
+        }
+        m.faceVerts.insert(m.faceVerts.end(), poly.begin(), poly.end());
+        m.faceStart.push_back(uint32_t(m.faceVerts.size()));
     }
+    if (uv) m.weldUVs();
     // Mirror creases.
     std::vector<std::tuple<uint32_t, uint32_t, float>> cr;
     for (uint32_t e = 0; e < m.numEdges(); ++e)
@@ -605,19 +687,27 @@ std::vector<Mesh> separate(const Mesh& m)
     std::vector<Mesh> out;
     std::vector<std::vector<uint32_t>> localIndex;
     std::vector<uint32_t> local(m.numVerts(), kInvalid);
+    const bool uv = m.hasUVs();
     for (uint32_t f = 0; f < m.numFaces(); ++f) {
         uint32_t root = uf.find(m.faceVerts[m.faceStart[f]]);
         auto [it, inserted] = compOf.emplace(root, uint32_t(out.size()));
         if (inserted) out.emplace_back();
         Mesh& dst = out[it->second];
         std::vector<uint32_t> poly;
-        for (uint32_t v : m.faceVertices(f)) {
+        std::vector<Vec2> polyUV;
+        for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h) {
+            uint32_t v = m.faceVerts[h];
             if (local[v] == kInvalid) local[v] = dst.addVertex(m.positions[v]);
             poly.push_back(local[v]);
+            if (uv) polyUV.push_back(m.cornerUV(h));
         }
-        dst.addFace(poly);
+        if (uv) dst.addFaceWithUVs(poly, polyUV);
+        else dst.addFace(poly);
     }
-    for (Mesh& part : out) part.buildTopology();
+    for (Mesh& part : out) {
+        if (uv) part.weldUVs();
+        part.buildTopology();
+    }
     // Carry creases.
     for (uint32_t e = 0; e < m.numEdges(); ++e) {
         if (m.edgeCrease[e] <= 0) continue;

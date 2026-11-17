@@ -59,6 +59,7 @@ protected:
     void enterEvent(QEnterEvent* e) override;
     void leaveEvent(QEvent* e) override;
     void focusOutEvent(QFocusEvent* e) override;
+    bool event(QEvent* e) override;
 
 private:
     struct Hit {
@@ -72,6 +73,7 @@ private:
         std::vector<float> w;
         std::vector<Vec3> start;
         Mat4 world, inv;
+        std::vector<uint8_t> mirror; // 0 = normal, 1 = mirrored partner, 2 = on the symmetry plane
     };
     struct Manip {
         Tool tool = Tool::Select;
@@ -95,7 +97,31 @@ private:
         SceneObject* obj = nullptr;
         uint32_t index = kInvalid;
     };
-    enum class Drag { None, Tumble, Track, Dolly, Marquee, Manip, SoftRadius, Menu, LoopSlide };
+    struct CutState {
+        SceneObject* obj = nullptr;
+        std::vector<ops::CutPoint> pts;
+        std::vector<Vec3> world;
+        bool hoverValid = false;
+        ops::CutPoint hover;
+        Vec3 hoverWorld;
+    };
+    struct WeldState {
+        SceneObject* obj = nullptr;
+        uint32_t src = kInvalid, dst = kInvalid;
+    };
+    struct QuadState {
+        uint32_t target = 0;
+        std::vector<uint32_t> preview;  // quad to create (target vertex ids)
+        uint32_t hoverVert = kInvalid, hoverEdge = kInvalid;
+        float hoverT = 0.5f;
+        uint32_t dragVert = kInvalid;
+        std::vector<uint32_t> touched;   // relax: vertices changed this stroke
+        std::vector<Vec3> before;        // their start positions
+        bool extend = false;
+        QPoint pressPos;
+        bool shiftPress = false;
+    };
+    enum class Drag { None, Tumble, Track, Dolly, Marquee, Manip, SoftRadius, Menu, LoopSlide, Cut, Weld, QuadVert, QuadRelax, QuadShift, QuadExtend };
 
     // layout
     std::vector<int> visibleSlots() const;
@@ -127,6 +153,15 @@ private:
     void updateHover(int slot, QPoint p);
     void drawOverlays(int slot, const ViewParams& vp);
     void drawHud(class QPainter& p);
+    // Multi-Cut / Target Weld / Quad Draw
+    bool cutPointAt(int slot, QPoint p, SceneObject*& obj, ops::CutPoint& cp, Vec3& world);
+    void commitCut();
+    SceneObject* quadTarget(bool create);
+    void updateQuadHover(int slot, QPoint p, bool shift);
+    void quadPress(int slot, QPoint p, Qt::KeyboardModifiers mods);
+    void quadRelease(QPoint p);
+    void quadRelax(int slot, QPoint p);
+    bool liveHit(int slot, QPoint p, Vec3& world);
     AABB selectionBounds(bool componentsOnly) const;
 
     Scene* scene_;
@@ -150,6 +185,10 @@ private:
     Manip manip_;
     LoopPreview loop_;
     HoverComp hoverComp_;
+    CutState cut_;
+    WeldState weld_;
+    QuadState qd_;
+    bool tabHeld_ = false;
 
     bool bHeld_ = false, bUsed_ = false, xHeld_ = false, jHeld_ = false, spaceHeld_ = false, hotboxShown_ = false;
     QElapsedTimer spaceTimer_;

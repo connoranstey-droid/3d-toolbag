@@ -35,6 +35,73 @@ static void applyDarkTheme(QApplication& app)
 static void buildDemo(MainWindow& w, const QString& variant)
 {
     Scene& s = *w.scene();
+    if (variant == "bevel") {
+        modeling::createPrimitive(s, "polyCube");
+        SceneObject* c = s.lead();
+        c->st.translate = {-1.6f, 0.5f, 0};
+        s.setMode(SelectMode::Edge);
+        for (uint32_t e = 0; e < c->mesh().numEdges(); ++e) c->sel.edges.push_back(e);
+        modeling::bevel(s, 0.12f, 3, true);
+        s.setMode(SelectMode::Object);
+        modeling::createPrimitive(s, "polyCylinder");
+        SceneObject* cy = s.lead();
+        cy->st.translate = {1.4f, 1.0f, 0};
+        s.setMode(SelectMode::Edge);
+        const Mesh& m = cy->mesh();
+        for (uint32_t e = 0; e < m.numEdges(); ++e)
+            if (m.edges[e].faceCount == 2 && std::abs(std::abs(m.positions[m.edges[e].v0].y) - 1) < 1e-4f &&
+                std::abs(std::abs(m.positions[m.edges[e].v1].y) - 1) < 1e-4f)
+                cy->sel.edges.push_back(e);
+        modeling::bevel(s, 0.15f, 4, true);
+        s.setMode(SelectMode::Object);
+        s.selectObjects({c->id}, SelectOp::Replace);
+        w.viewport()->options.wireOnShaded = true;
+        s.undo.setClean();
+        return;
+    }
+    if (variant == "uv") {
+        modeling::createPrimitive(s, "polyCylinder");
+        SceneObject* cy = s.lead();
+        cy->st.translate = {1.2f, 1.0f, 0};
+        modeling::createPrimitive(s, "polyCube");
+        SceneObject* c = s.lead();
+        c->st.translate = {-1.4f, 0.6f, 0};
+        modeling::projectUVs(s, modeling::Projection::Automatic);
+        // Unfold the cylinder's seamed default UVs (side + two caps) with LSCM, then pack.
+        s.selectObjects({cy->id}, SelectOp::Replace);
+        modeling::unfoldUVs(s);
+        modeling::layoutUVs(s);
+        w.setChecker(true);
+        w.openUVEditor();
+        s.undo.setClean();
+        return;
+    }
+    if (variant == "retopo") {
+        modeling::createPrimitive(s, "polySphere");
+        SceneObject* sp = s.lead();
+        sp->st.history->set("subdivisionsAxis", 80);
+        sp->st.history->set("subdivisionsHeight", 60);
+        sp->st.history->set("radius", 2);
+        sp->st.mesh = std::make_shared<Mesh>(buildPrimitive(*sp->st.history));
+        // Lumpy "sculpt" so the retopo visibly follows a surface.
+        for (auto& p : sp->st.mesh->positions) p = p * (1.0f + 0.08f * std::sin(p.x * 3.0f) * std::cos(p.y * 4.0f));
+        sp->st.mesh->touchPositions();
+        sp->st.history.reset();
+        modeling::toggleLive(s);
+        modeling::createPrimitive(s, "polyPlane");
+        SceneObject* pl = s.lead();
+        pl->st.history->set("width", 2.4);
+        pl->st.history->set("height", 2.4);
+        pl->st.history->set("subdivisionsWidth", 6);
+        pl->st.history->set("subdivisionsHeight", 6);
+        pl->st.mesh = std::make_shared<Mesh>(buildPrimitive(*pl->st.history));
+        pl->st.name = "retopo1";
+        pl->st.translate = {0, 2.3f, 0};
+        modeling::conform(s);
+        s.setTool(Tool::QuadDraw);
+        s.undo.setClean();
+        return;
+    }
     modeling::createPrimitive(s, "polyCube");
     SceneObject* cube = s.lead();
     cube->st.translate = {-2.2f, 0.5f, 0};
@@ -106,7 +173,8 @@ int main(int argc, char** argv)
     w.show();
     const QStringList pos = cli.positionalArguments();
     if (!pos.isEmpty()) {
-        if (pos[0].endsWith(".obj", Qt::CaseInsensitive)) w.report(modeling::importObj(*w.scene(), pos[0]));
+        if (pos[0].endsWith(".obj", Qt::CaseInsensitive) || pos[0].endsWith(".fbx", Qt::CaseInsensitive))
+            w.report(modeling::importFile(*w.scene(), pos[0]));
         else w.scene()->load(pos[0]);
     } else if (cli.isSet(demo) || cli.isSet(shot)) {
         buildDemo(w, cli.value(demo));
@@ -125,6 +193,11 @@ int main(int argc, char** argv)
             p.drawImage(QRect(w.viewport()->mapTo(&w, QPoint(0, 0)), w.viewport()->size()), vp);
             p.end();
             shot.save(file);
+            if (QWidget* uvw = w.uvEditorWindow(); uvw && uvw->isVisible()) {
+                QString f2 = file;
+                f2.insert(f2.lastIndexOf('.'), "-uveditor");
+                uvw->grab().save(f2);
+            }
             QApplication::quit();
         });
     }

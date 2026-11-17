@@ -19,6 +19,9 @@ add_library(facet_core STATIC
   src/mesh/Primitives.cpp
   src/mesh/Subdivision.cpp
   src/mesh/MeshOps.cpp
+  src/mesh/BevelBridge.cpp
+  src/mesh/UVOps.cpp
+  src/mesh/BVH.cpp
   src/mesh/ObjIO.cpp
 )
 target_include_directories(facet_core PUBLIC src)
@@ -40,9 +43,9 @@ if(FACET_BUILD_APP)
   find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL OpenGLWidgets)
   set(CMAKE_AUTOMOC ON)
   file(GLOB FACET_APP_SOURCES CONFIGURE_DEPENDS
-    src/scene/*.cpp src/render/*.cpp src/viewport/*.cpp src/ui/*.cpp)
+    src/io/*.cpp src/scene/*.cpp src/render/*.cpp src/viewport/*.cpp src/ui/*.cpp)
   file(GLOB FACET_APP_HEADERS CONFIGURE_DEPENDS
-    src/scene/*.h src/render/*.h src/viewport/*.h src/ui/*.h)
+    src/io/*.h src/scene/*.h src/render/*.h src/viewport/*.h src/ui/*.h)
   add_library(facet_app STATIC ${FACET_APP_SOURCES} ${FACET_APP_HEADERS})
   target_link_libraries(facet_app PUBLIC facet_core Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
   qt_add_executable(Facet MACOSX_BUNDLE src/main.cpp)
@@ -55,6 +58,8 @@ if(FACET_BUILD_APP)
       # Drives the real widgets with synthesized input; needs a display (use xvfb-run on CI).
       add_executable(facet_uitests tests/test_ui.cpp)
       target_link_libraries(facet_uitests PRIVATE facet_app Qt6::Test)
+      add_executable(facet_iotests tests/test_io.cpp)
+      target_link_libraries(facet_iotests PRIVATE facet_app)
     endif()
   endif()
 endif()

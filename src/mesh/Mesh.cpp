@@ -23,6 +23,8 @@ void Mesh::clear()
     positions.clear();
     faceStart.assign(1, 0);
     faceVerts.clear();
+    uvs.clear();
+    faceUVs.clear();
     heFace.clear(); heTwin.clear(); heEdge.clear();
     edges.clear(); edgeCrease.clear();
     vertEdgeStart.clear(); vertEdges.clear();
@@ -31,9 +33,89 @@ void Mesh::clear()
 
 uint32_t Mesh::addFace(std::span<const uint32_t> verts)
 {
+    if (hasUVs()) {
+        // Keep the UV channel parallel: give new corners uvs copied from another corner of the same vertex.
+        std::vector<uint32_t> any(numVerts(), kInvalid);
+        for (size_t h = 0; h < faceVerts.size(); ++h) any[faceVerts[h]] = faceUVs[h];
+        for (uint32_t v : verts) {
+            Vec2 uv = (v < any.size() && any[v] != kInvalid) ? uvs[any[v]] : Vec2{};
+            faceUVs.push_back(uint32_t(uvs.size()));
+            uvs.push_back(uv);
+        }
+    }
     faceVerts.insert(faceVerts.end(), verts.begin(), verts.end());
     faceStart.push_back(static_cast<uint32_t>(faceVerts.size()));
     return numFaces() - 1;
+}
+
+uint32_t Mesh::addFaceWithUVs(std::span<const uint32_t> verts, std::span<const Vec2> uv)
+{
+    if (!hasUVs() && !faceVerts.empty()) ensureUVs();
+    for (size_t i = 0; i < verts.size(); ++i) {
+        faceUVs.push_back(uint32_t(uvs.size()));
+        uvs.push_back(i < uv.size() ? uv[i] : Vec2{});
+    }
+    faceVerts.insert(faceVerts.end(), verts.begin(), verts.end());
+    faceStart.push_back(static_cast<uint32_t>(faceVerts.size()));
+    return numFaces() - 1;
+}
+
+void Mesh::ensureUVs()
+{
+    if (hasUVs() || faceVerts.empty()) return;
+    uvs.assign(numVerts(), Vec2{});
+    faceUVs = faceVerts;
+    touchUVs();
+}
+
+void Mesh::weldUVs(float eps)
+{
+    if (!hasUVs()) return;
+    const uint32_t H = numHalfEdges();
+    // Group corners by vertex (counting sort), then merge equal uv values within each group.
+    std::vector<uint32_t> start(numVerts() + 1, 0), order(H);
+    for (uint32_t h = 0; h < H; ++h) start[faceVerts[h] + 1]++;
+    for (uint32_t v = 0; v < numVerts(); ++v) start[v + 1] += start[v];
+    {
+        std::vector<uint32_t> fill(start.begin(), start.end() - 1);
+        for (uint32_t h = 0; h < H; ++h) order[fill[faceVerts[h]]++] = h;
+    }
+    std::vector<uint32_t> reps;
+    for (uint32_t v = 0; v < numVerts(); ++v) {
+        reps.clear();
+        for (uint32_t i = start[v]; i < start[v + 1]; ++i) {
+            uint32_t h = order[i];
+            const Vec2 uv = uvs[faceUVs[h]];
+            bool merged = false;
+            for (uint32_t r : reps)
+                if (std::abs(uvs[r].x - uv.x) <= eps && std::abs(uvs[r].y - uv.y) <= eps) { faceUVs[h] = r; merged = true; break; }
+            if (!merged) reps.push_back(faceUVs[h]);
+        }
+    }
+    compactUVs();
+}
+
+void Mesh::compactUVs()
+{
+    if (faceUVs.empty()) { uvs.clear(); return; }
+    std::vector<uint32_t> remap(uvs.size(), kInvalid);
+    std::vector<Vec2> out;
+    out.reserve(uvs.size());
+    for (uint32_t& u : faceUVs) {
+        if (remap[u] == kInvalid) { remap[u] = uint32_t(out.size()); out.push_back(uvs[u]); }
+        u = remap[u];
+    }
+    uvs = std::move(out);
+    touchUVs();
+}
+
+bool Mesh::isUVBorderEdge(uint32_t e) const
+{
+    if (!hasUVs()) return edges[e].faceCount != 2;
+    uint32_t h = edges[e].he, t = heTwin[h];
+    if (t == kInvalid) return true;
+    // h: a->b, t: b->a. Same uv at a means faceUVs[h] == faceUVs[next(t)].
+    return faceUVs[h] != faceUVs[heNext(t)] || faceUVs[heNext(h)] != faceUVs[t];
 }
 
 void Mesh::buildTopology()
@@ -240,7 +322,18 @@ void Mesh::removeUnusedVertices(std::vector<uint32_t>* remapOut)
 
 void Mesh::append(const Mesh& other, const Mat4& xform)
 {
+    const bool wantUV = hasUVs() || other.hasUVs();
+    if (wantUV) ensureUVs();
     const uint32_t base = numVerts();
+    if (wantUV) {
+        const uint32_t uvBase = uint32_t(uvs.size());
+        if (other.hasUVs()) {
+            uvs.insert(uvs.end(), other.uvs.begin(), other.uvs.end());
+            for (uint32_t u : other.faceUVs) faceUVs.push_back(u + uvBase);
+        } else {
+            for (size_t i = 0; i < other.faceVerts.size(); ++i) { faceUVs.push_back(uint32_t(uvs.size())); uvs.push_back({}); }
+        }
+    }
     for (const Vec3& p : other.positions) positions.push_back(xform.transformPoint(p));
     for (uint32_t f = 0; f < other.numFaces(); ++f) {
         for (uint32_t v : other.faceVertices(f)) faceVerts.push_back(v + base);
@@ -260,6 +353,7 @@ void Mesh::append(const Mesh& other, const Mat4& xform)
 void Mesh::reverseFace(uint32_t f)
 {
     std::reverse(faceVerts.begin() + faceStart[f], faceVerts.begin() + faceStart[f + 1]);
+    if (faceUVs.size() == faceVerts.size()) std::reverse(faceUVs.begin() + faceStart[f], faceUVs.begin() + faceStart[f + 1]);
 }
 
 } // namespace facet

@@ -159,6 +159,8 @@ std::unique_ptr<SceneObject> Scene::takeObject(uint32_t id, int* indexOut)
 void Scene::clear()
 {
     undo.clear();
+    liveId = 0;
+    liveBvhFor_ = 0;
     objects.clear();
     selection_.clear();
     mode_ = SelectMode::Object;
@@ -172,7 +174,7 @@ void Scene::setMode(SelectMode m)
 {
     if (m == mode_) return;
     mode_ = m;
-    if (tool_ == Tool::InsertEdgeLoop && m == SelectMode::Object) tool_ = Tool::Select;
+    if ((tool_ == Tool::InsertEdgeLoop || tool_ == Tool::MultiCut || tool_ == Tool::TargetWeld) && m == SelectMode::Object) tool_ = Tool::Select;
     emit modeChanged();
     notifySelectionChanged();
 }
@@ -214,6 +216,7 @@ void Scene::setSelection(const std::vector<uint32_t>& ids)
 void Scene::selectComponents(SceneObject* obj, std::vector<uint32_t> items, SelectOp op, bool notify)
 {
     if (!obj || mode_ == SelectMode::Object) return;
+    items = withMirrored(obj, items);
     ops::sortUnique(items);
     auto& list = obj->compList(mode_);
     std::vector<uint32_t> out;
@@ -302,6 +305,108 @@ std::vector<float> Scene::softWeights(SceneObject* obj) const
         }
     }
     return w;
+}
+
+std::vector<uint32_t> Scene::mirrorMap(SceneObject* obj, int axis) const
+{
+    const Mesh& m = obj->mesh();
+    std::vector<uint32_t> out(m.numVerts(), kInvalid);
+    if (axis < 0 || axis > 2) return out;
+    float size = std::max(length(m.bounds().size()), 1e-6f);
+    const float tol = size * 1e-4f, inv = 1.0f / (tol * 4);
+    auto key = [&](const Vec3& p) {
+        return uint64_t((int64_t(std::floor(p.x * inv)) * 73856093) ^ (int64_t(std::floor(p.y * inv)) * 19349663) ^
+                        (int64_t(std::floor(p.z * inv)) * 83492791));
+    };
+    std::unordered_multimap<uint64_t, uint32_t> grid;
+    for (uint32_t v = 0; v < m.numVerts(); ++v) grid.emplace(key(m.positions[v]), v);
+    for (uint32_t v = 0; v < m.numVerts(); ++v) {
+        Vec3 q = m.positions[v];
+        q[axis] = -q[axis];
+        float best = tol * tol;
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dz = -1; dz <= 1; ++dz) {
+                    Vec3 c = q + Vec3{dx / inv, dy / inv, dz / inv};
+                    auto r = grid.equal_range(key(c));
+                    for (auto it = r.first; it != r.second; ++it) {
+                        float d = length2(m.positions[it->second] - q);
+                        if (d <= best) { best = d; out[v] = it->second; }
+                    }
+                }
+    }
+    return out;
+}
+
+std::vector<uint32_t> Scene::withMirrored(SceneObject* obj, const std::vector<uint32_t>& items) const
+{
+    if (symmetry < 0 || mode_ == SelectMode::Object || !obj) return items;
+    auto mm = mirrorMap(obj, symmetry);
+    const Mesh& m = obj->mesh();
+    std::vector<uint32_t> out = items;
+    for (uint32_t i : items) {
+        if (mode_ == SelectMode::Vertex) {
+            if (i < mm.size() && mm[i] != kInvalid) out.push_back(mm[i]);
+        } else if (mode_ == SelectMode::Edge) {
+            if (i >= m.numEdges()) continue;
+            uint32_t a = mm[m.edges[i].v0], b = mm[m.edges[i].v1];
+            if (a != kInvalid && b != kInvalid) {
+                uint32_t e = m.findEdge(a, b);
+                if (e != kInvalid) out.push_back(e);
+            }
+        } else {
+            if (i >= m.numFaces()) continue;
+            std::vector<uint32_t> want;
+            bool ok = true;
+            for (uint32_t v : m.faceVertices(i)) { ok &= mm[v] != kInvalid; if (ok) want.push_back(mm[v]); }
+            if (!ok) continue;
+            std::sort(want.begin(), want.end());
+            for (uint32_t f : m.vertexFaces(want[0])) {
+                std::vector<uint32_t> have(m.faceVertices(f).begin(), m.faceVertices(f).end());
+                std::sort(have.begin(), have.end());
+                if (have == want) { out.push_back(f); break; }
+            }
+        }
+    }
+    return out;
+}
+
+const TriBVH* Scene::liveBVH()
+{
+    SceneObject* o = liveObject();
+    if (!o) return nullptr;
+    const Mesh& m = o->mesh();
+    if (liveBvhFor_ != o->id || liveBvh_.topologyId != m.topologyId || liveBvh_.positionId != m.positionId) {
+        liveBvh_.build(m);
+        liveBvhFor_ = o->id;
+    }
+    return &liveBvh_;
+}
+
+bool Scene::rayToLive(const Ray& r, Vec3& hit, Vec3* normal)
+{
+    const TriBVH* b = liveBVH();
+    if (!b) return false;
+    SceneObject* o = liveObject();
+    Mat4 w = o->worldMatrix(), inv = w.inverse();
+    Ray lr{inv.transformPoint(r.origin), inv.transformDir(r.dir)};
+    auto h = b->raycast(lr);
+    if (!h.hit) return false;
+    hit = w.transformPoint(h.point);
+    if (normal) *normal = normalize(inv.transposed().transformDir(h.normal));
+    return true;
+}
+
+bool Scene::closestOnLive(const Vec3& p, Vec3& out, float maxDist)
+{
+    const TriBVH* b = liveBVH();
+    if (!b) return false;
+    SceneObject* o = liveObject();
+    Mat4 w = o->worldMatrix(), inv = w.inverse();
+    auto h = b->closest(inv.transformPoint(p), maxDist);
+    if (!h.hit) return false;
+    out = w.transformPoint(h.point);
+    return true;
 }
 
 void Scene::setTool(Tool t)

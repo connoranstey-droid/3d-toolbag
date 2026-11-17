@@ -9,6 +9,8 @@ namespace facet {
 // and child face c (one quad per parent corner) derives from parent face heFace[c].
 void subdivideTopology(const Mesh& parent, Mesh& child);
 void subdividePositions(const Mesh& parent, Mesh& child);
+// Face-varying UVs for the child (linear interpolation; seams stay seams).
+void subdivideUVs(const Mesh& parent, Mesh& child);
 
 // Bakes `levels` Catmull-Clark steps into a new mesh (Mesh > Smooth).
 Mesh subdivide(const Mesh& cage, int levels);
@@ -25,7 +27,7 @@ public:
 private:
     std::vector<Mesh> levels_;
     std::vector<uint32_t> faceOrigin_;
-    uint64_t topoId_ = 0, posId_ = 0;
+    uint64_t topoId_ = 0, posId_ = 0, uvId_ = 0;
     int levelCount_ = -1;
 };
 

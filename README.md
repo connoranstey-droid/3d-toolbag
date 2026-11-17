@@ -36,18 +36,23 @@ cmake -S . -B build -G Ninja && cmake --build build
 ./build/Facet
 ```
 
-Command-line options: `Facet scene.facet`, `Facet model.obj`, `Facet --demo [faces|soft]`,
+Command-line options: `Facet scene.facet`, `Facet model.obj|model.fbx`, `Facet --demo [faces|soft|bevel|uv|retopo]`,
 `Facet --quad`, `Facet --screenshot out.png`.
 
 ### Tests
 
 ```sh
-./build/facet_tests                 # geometry core: topology, subdivision, every modeling op
+./build/facet_tests                 # geometry core: topology, subdivision, bevel/bridge/cut, UV tools, BVH
+./build/facet_iotests               # FBX binary round trip + ASCII FBX parsing
 xvfb-run -a ./build/facet_uitests   # drives the real window with synthesized mouse/keys
 ```
 
-The UI tests click, marquee, drag gizmos, extrude, insert loops, use marking-menu gestures and
-check hotkeys against the real viewport and its GPU picking.
+The UI tests click, marquee, drag gizmos (with symmetry), extrude, bevel, multi-cut, target-weld,
+quad-draw on a live surface, transform UVs in the UV Editor, export/import FBX, use marking-menu
+gestures and check hotkeys against the real viewport and its GPU picking.
+
+FBX output has also been validated against an independent reader (Assimp), and FBX files written
+by Assimp (binary 7.5 and ASCII) import correctly.
 
 ## What's in v0.1
 
@@ -62,6 +67,47 @@ check hotkeys against the real viewport and its GPU picking.
   Reverse normals, Freeze / Reset transforms, Center pivot.
 - Primitives with **construction history**: edit the INPUTS (subdivisions, radius…) in the
   Channel Box and the mesh regenerates, until you edit components (as in Maya).
+
+**Hard-surface & topology tools**
+- **Bevel** (Ctrl+B): offset, segments, round profile; handles edge loops, corners where 2–3+
+  bevelled edges meet, and edges ending at unbevelled vertices.
+- **Bridge**: two border edge loops/chains or two face regions, with divisions.
+- **Multi-Cut**: click edge/vertex points to cut through faces (Shift = 10% snapping,
+  Ctrl+click = full edge loop, Enter/RMB to commit).
+- **Target Weld**: drag one vertex onto another.
+- **Symmetry** (status line / Mesh Tools): object X/Y/Z. Selection and all component transforms
+  are mirrored, and seam vertices stay on the plane.
+
+**UVs** (UV menu, UV shelf, and a floating **UV Editor**, Ctrl+Shift+U)
+- Face-varying UVs kept through every modeling op, through subdivision and through OBJ/FBX.
+- Planar (X/Y/Z/best), Cylindrical, Spherical and Automatic projections, on selected faces or
+  the whole mesh.
+- Cut and Move-and-Sew along selected edges; **Unfold** (Least Squares Conformal Maps, area
+  preserving); **Layout** (uniform texel density, rotation for tight boxes, shelf packing);
+  Normalize, Flip, Rotate 90.
+- UV Editor with UV and UV-shell selection, W/E/R transforms (MMB drag), undo, and UV borders
+  drawn thick.
+- `6` shows a UV checker in the viewport.
+
+**Retopology**
+- **Make Live** turns a high-poly mesh into a snap surface (BVH ray casts and closest-point queries).
+- **Quad Draw**: click to drop dots on the surface, Shift+click to fill a quad from the nearest
+  four, Shift+drag to relax (re-projected onto the surface), drag a vertex to slide it on the
+  surface, Ctrl+click to delete a vertex or insert an edge loop, Ctrl+Shift+click to delete a
+  face, Tab+drag on a border edge to extend a strip.
+- **Conform** snaps any mesh or component selection onto the live surface.
+
+**FBX** (File > Import / Export)
+- Reads binary FBX (7.x, including 7.5's 64-bit headers and zlib arrays) and ASCII FBX. It imports
+  polygons, the first UV set, transforms, pre-rotation and parenting (baked into each object), and
+  welds split vertices from game-engine exports.
+- Writes binary FBX 7.4 with geometry, smooth normals, UVs ("map1"), a lambert material and
+  per-object transforms.
+- Not yet: creases, multiple UV sets, materials beyond a default lambert, skinning or animation.
+
+![bevel](docs/bevel.png)
+![uv editor](docs/uv.png)
+![retopology](docs/retopo.png)
 
 **Maya-style interaction**
 
@@ -83,6 +129,10 @@ check hotkeys against the real viewport and its GPU picking.
 | Shift + RMB | Marking menu: modeling tools for the current mode |
 | Ctrl + RMB | Marking menu: convert selection |
 | Ctrl+E | Extrude (manipulator switches to normal orientation) |
+| Ctrl+B | Bevel |
+| 6 | UV checker display |
+| Ctrl+Shift+U | UV Editor (inside it: W/E/R, F, A, Alt+MMB pan, wheel zoom) |
+| Ctrl+I | Import FBX / OBJ |
 | G | Repeat last command |
 | 1 / 2 / 3, PgUp / PgDn | Smooth preview off / cage + smooth / smooth, smooth level |
 | 4 / 5 | Wireframe / shaded |
@@ -103,7 +153,9 @@ Platform notes: on macOS, Maya's Ctrl shortcuts are on ⌘, Alt is ⌥, and F8�
 
 ```
 src/math      Vec/Mat/AABB/Ray (no dependencies)
-src/mesh      Mesh (half-edge), Subdivision, MeshOps, Primitives, ObjIO   ← pure C++, unit-tested
+src/mesh      Mesh (half-edge + face-varying UVs), Subdivision, MeshOps, BevelBridge, UVOps (LSCM),
+              BVH, Primitives, ObjIO   ← pure C++, unit-tested
+src/io        FBX reader (binary + ASCII) and binary 7.4 writer (Qt zlib)
 src/scene     Scene, objects + construction history, undo commands, Modeling (high-level commands)
 src/render    OpenGL 4.1 core renderer: studio-lit shading, cage/smooth wires, overlays, ID pick pass
 src/viewport  Viewport widget: cameras, picking, manipulators, tools, HUD
@@ -116,11 +168,10 @@ so undo/redo just swaps mesh snapshots and everything stays in sync.
 
 ## Roadmap (high-poly / VFX priorities)
 
-1. **Bevel / chamfer** with segments and profile (the key hard-surface support-loop tool), Bridge, Multi-Cut, Offset Edge Loop, Target Weld, Slide Edge.
-2. **Symmetry modeling** (live mirrored component edits across a world or object axis).
-3. **UVs**: face-varying UVs preserved through all ops, OBJ UV I/O, unfold, UV editor.
-4. **Sculpting**: multires / dynamic-tessellation brushes (grab, smooth, crease, inflate, clay) on millions of polys, with masks and layers.
-5. **Retopology**: Quad Draw-style tool snapping to a high-poly live surface.
-6. Hard/soft edge normals, normal locking; displacement and normal baking.
-7. Python scripting (`cmds`-like) and a Script Editor; customizable hotkeys and shelves.
-8. Interchange: FBX, USD and Alembic; GPU subdivision via OpenSubdiv for very dense previews.
+1. **Hard/soft edge normals** (fixes faceted shading at bevel boundaries), normal locking; displacement and normal baking.
+2. Offset Edge Loop, Slide Edge, Poke, Wedge; bevel with chamfer-mitering options; world-space symmetry.
+3. **Sculpting**: multires / dynamic-tessellation brushes (grab, smooth, crease, inflate, clay) on millions of polys, with masks and layers.
+4. UV: optimize (ARAP), straighten shells, texel-density tools, UDIM tiles, image textures.
+5. FBX: creases, multiple UV sets, materials/textures; USD and Alembic.
+6. Python scripting (`cmds`-like) and a Script Editor; customizable hotkeys and shelves.
+7. GPU subdivision via OpenSubdiv for very dense previews.

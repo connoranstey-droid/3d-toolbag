@@ -21,6 +21,9 @@ public:
     Scene* scene() { return scene_; }
     Viewport* viewport() { return viewport_; }
     void report(const QString& msg);
+    void openUVEditor();
+    void setChecker(bool on);
+    QWidget* uvEditorWindow() const { return reinterpret_cast<QWidget*>(uvDock_); }
 
 protected:
     void closeEvent(QCloseEvent* e) override;
@@ -41,6 +44,7 @@ private:
     void openScene();
     bool saveScene(bool saveAs);
     void showHotkeys();
+    void bevelOptions();
 
     Scene* scene_;
     Viewport* viewport_;
@@ -55,7 +59,14 @@ private:
     QActionGroup* modeGroup_ = nullptr;
     QActionGroup* toolGroup_ = nullptr;
     QAction* modeActs_[4] = {};
-    QAction* toolActs_[5] = {};
+    QAction* toolActs_[8] = {};
+    float bevelOffset_ = 0.1f;
+    int bevelSegments_ = 1;
+    bool bevelRound_ = true;
+    int bridgeDivisions_ = 0;
+    class QDockWidget* uvDock_ = nullptr;
+    class UVEditor* uvEditor_ = nullptr;
+    QAction* checkerAct_ = nullptr;
     QAction* softAct_ = nullptr;
     QString helpText_;
 };

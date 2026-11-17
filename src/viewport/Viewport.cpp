@@ -40,9 +40,22 @@ Viewport::Viewport(Scene* scene, QWidget* parent) : QOpenGLWidget(parent), scene
     auto refresh = [this] { update(); };
     connect(scene_, &Scene::sceneChanged, this, refresh);
     connect(scene_, &Scene::selectionChanged, this, refresh);
-    connect(scene_, &Scene::toolChanged, this, [this] { loop_ = {}; update(); });
+    connect(scene_, &Scene::toolChanged, this, [this] {
+        loop_ = {};
+        cut_ = {};
+        weld_ = {};
+        qd_ = {};
+        update();
+    });
     connect(scene_, &Scene::modeChanged, this, [this] { hoverComp_ = {}; update(); });
-    connect(scene_, &Scene::objectsChanged, this, [this] { loop_ = {}; hoverComp_ = {}; update(); });
+    connect(scene_, &Scene::objectsChanged, this, [this] {
+        loop_ = {};
+        hoverComp_ = {};
+        cut_ = {};
+        weld_ = {};
+        if (qd_.target && !scene_->find(qd_.target)) qd_ = {};
+        update();
+    });
 }
 
 Viewport::~Viewport()
@@ -278,6 +291,60 @@ void Viewport::drawOverlays(int slot, const ViewParams& vp)
         gl->glDisable(GL_DEPTH_TEST);
         renderer_.drawLines(loop_.lines, {1.0f, 0.9f, 0.1f, 1.0f}, vp.viewProj, false);
     }
+    // Multi-Cut preview.
+    if (scene_->tool() == Tool::MultiCut && (cut_.obj || cut_.hoverValid)) {
+        std::vector<Vec3> pts = cut_.world;
+        if (cut_.hoverValid) pts.push_back(cut_.hoverWorld);
+        std::vector<Vec3> lines;
+        for (size_t i = 0; i + 1 < pts.size(); ++i) lines.insert(lines.end(), {pts[i], pts[i + 1]});
+        renderer_.drawLines(lines, {1.0f, 0.85f, 0.1f, 1.0f}, vp.viewProj, false);
+        renderer_.drawPoints(cut_.world, {0.2f, 1.0f, 0.4f, 1.0f}, vp.viewProj, 7.0f * vp.dpr, false);
+        if (cut_.hoverValid) renderer_.drawPoints({cut_.hoverWorld}, {1.0f, 0.3f, 0.2f, 1.0f}, vp.viewProj, 8.0f * vp.dpr, false);
+    }
+    // Target Weld preview.
+    if (scene_->tool() == Tool::TargetWeld && weld_.obj && weld_.src != kInvalid && weld_.src < weld_.obj->mesh().numVerts()) {
+        Mat4 w = weld_.obj->worldMatrix();
+        Vec3 a = w.transformPoint(weld_.obj->mesh().positions[weld_.src]);
+        Vec3 b;
+        if (weld_.dst != kInvalid) b = w.transformPoint(weld_.obj->mesh().positions[weld_.dst]);
+        else {
+            Ray r = rayAt(slot, mousePos_);
+            b = r.origin + r.dir * dot(a - r.origin, r.dir);
+        }
+        renderer_.drawLines({a, b}, {1.0f, 0.85f, 0.1f, 1.0f}, vp.viewProj, false);
+        renderer_.drawPoints({a}, {1.0f, 0.3f, 0.2f, 1.0f}, vp.viewProj, 8.0f * vp.dpr, false);
+        if (weld_.dst != kInvalid) renderer_.drawPoints({b}, {0.2f, 1.0f, 0.4f, 1.0f}, vp.viewProj, 9.0f * vp.dpr, false);
+    }
+    // Quad Draw: dots, hovered component and quad preview.
+    if (scene_->tool() == Tool::QuadDraw) {
+        if (SceneObject* t = quadTarget(false)) {
+            const Mesh& m = t->mesh();
+            Mat4 w = t->worldMatrix(), mvp = vp.viewProj * w;
+            std::vector<Vec3> dots, verts;
+            for (uint32_t v = 0; v < m.numVerts(); ++v) (m.vertexFaces(v).empty() ? dots : verts).push_back(m.positions[v]);
+            std::vector<Vec3> wire;
+            for (const auto& e : m.edges) wire.insert(wire.end(), {m.positions[e.v0], m.positions[e.v1]});
+            renderer_.drawLines(wire, {0.35f, 0.75f, 1.0f, 1.0f}, mvp, false);
+            renderer_.drawPoints(verts, {0.35f, 0.75f, 1.0f, 1.0f}, mvp, 5.0f * vp.dpr, false);
+            renderer_.drawPoints(dots, {0.2f, 1.0f, 0.35f, 1.0f}, mvp, 7.0f * vp.dpr, false);
+            if (qd_.hoverVert != kInvalid && qd_.hoverVert < m.numVerts())
+                renderer_.drawPoints({m.positions[qd_.hoverVert]}, {1.0f, 0.3f, 0.2f, 1.0f}, mvp, 9.0f * vp.dpr, false);
+            else if (qd_.hoverEdge != kInvalid && qd_.hoverEdge < m.numEdges())
+                renderer_.drawLines({m.positions[m.edges[qd_.hoverEdge].v0], m.positions[m.edges[qd_.hoverEdge].v1]}, {1.0f, 0.3f, 0.2f, 1.0f}, mvp, false);
+            if (qd_.preview.size() >= 3) {
+                std::vector<Vec3> l, tri;
+                for (size_t i = 0; i < qd_.preview.size(); ++i)
+                    l.insert(l.end(), {m.positions[qd_.preview[i]], m.positions[qd_.preview[(i + 1) % qd_.preview.size()]]});
+                for (size_t i = 1; i + 1 < qd_.preview.size(); ++i)
+                    tri.insert(tri.end(), {m.positions[qd_.preview[0]], m.positions[qd_.preview[i]], m.positions[qd_.preview[i + 1]]});
+                gl->glEnable(GL_BLEND);
+                gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                renderer_.drawLines(tri, {1.0f, 0.85f, 0.1f, 0.25f}, mvp, false, GL_TRIANGLES);
+                gl->glDisable(GL_BLEND);
+                renderer_.drawLines(l, {1.0f, 0.85f, 0.1f, 1.0f}, mvp, false);
+            }
+        }
+    }
     // Pre-selection highlight.
     bool hoverAlive = false;
     for (const auto& o : scene_->objects) hoverAlive |= o.get() == hoverComp_.obj; // compare, never dereference a stale pointer
@@ -378,6 +445,23 @@ void Viewport::drawHud(QPainter& p)
             p.setBrush(QColor(255, 255, 255, 18));
             p.drawRect(mr);
         }
+    }
+    if (scene_->tool() == Tool::QuadDraw && drag_ == Drag::QuadRelax) {
+        p.setPen(QPen(QColor(120, 220, 255), 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(mousePos_, 60, 60);
+    }
+    if (scene_->tool() == Tool::QuadDraw) {
+        QRect r = slotRect(active_);
+        p.setPen(QColor(150, 230, 160));
+        p.drawText(r.x() + 12, r.bottom() - 44,
+                   scene_->liveObject() ? "Quad Draw: click = dot · Shift+click = fill quad · Shift+drag = relax · drag dot = slide · Ctrl+click = delete / insert loop · Tab+drag border = extend"
+                                        : "Quad Draw: make a mesh live first (Mesh Tools > Make Live)");
+    }
+    if (scene_->tool() == Tool::MultiCut) {
+        QRect r = slotRect(active_);
+        p.setPen(QColor(255, 220, 90));
+        p.drawText(r.x() + 12, r.bottom() - 44, "Multi-Cut: click edges/vertices · Shift snaps 10% · Ctrl+click = edge loop · Enter/RMB = cut · Backspace = undo point · Esc = clear");
     }
     if (!transientText_.isEmpty()) {
         QRect r = slotRect(active_);
@@ -768,13 +852,36 @@ void Viewport::beginManip(int slot, Handle h, QPoint p)
         for (SceneObject* o : scene_->selectedObjects()) {
             std::vector<float> w = scene_->softWeights(o);
             if (w.empty()) continue;
-            CompEntry ce{o, o->st.mesh, {}, {}, {}, o->worldMatrix(), o->worldMatrix().inverse()};
+            CompEntry ce{o, o->st.mesh, {}, {}, {}, o->worldMatrix(), o->worldMatrix().inverse(), {}};
             for (uint32_t v = 0; v < w.size(); ++v)
                 if (w[v] > 0.0f) {
                     ce.idx.push_back(v);
                     ce.w.push_back(w[v]);
                     ce.start.push_back(o->mesh().positions[v]);
+                    ce.mirror.push_back(0);
                 }
+            if (scene_->symmetry >= 0) {
+                // Each affected vertex drags its mirror partner; the negative side follows the positive side.
+                const int ax = scene_->symmetry;
+                auto mm = scene_->mirrorMap(o, ax);
+                std::vector<int> slot(w.size(), -1);
+                for (size_t k = 0; k < ce.idx.size(); ++k) slot[ce.idx[k]] = int(k);
+                const size_t n0 = ce.idx.size();
+                for (size_t k = 0; k < n0; ++k) {
+                    uint32_t v = ce.idx[k], mv = mm[v];
+                    if (mv == kInvalid) continue;
+                    if (mv == v) { ce.mirror[k] = 2; continue; }
+                    if (slot[mv] >= 0) {
+                        if (ce.start[k][ax] < 0) ce.mirror[k] = 1;
+                        continue;
+                    }
+                    slot[mv] = int(ce.idx.size());
+                    ce.idx.push_back(mv);
+                    ce.w.push_back(ce.w[k]);
+                    ce.start.push_back(o->mesh().positions[mv]);
+                    ce.mirror.push_back(1);
+                }
+            }
             if (!ce.idx.empty()) m.comps.push_back(std::move(ce));
         }
         if (m.comps.empty()) return;
@@ -854,19 +961,29 @@ void Viewport::updateManip(QPoint p)
     for (CompEntry& ce : m.comps) {
         Mesh& mesh = *ce.mesh;
         const Vec3 localDelta = ce.inv.transformDir(delta);
-        parallelFor(ce.idx.size(), [&](size_t k) {
-            const float w = ce.w[k];
-            Vec3 p0 = ce.start[k];
-            Vec3 out = p0;
-            if (m.tool == Tool::Move) out = p0 + localDelta * w;
-            else if (m.tool == Tool::Rotate) {
+        const int ax = scene_->symmetry;
+        auto xf = [&](const Vec3& p0, float w) {
+            if (m.tool == Tool::Move) return p0 + localDelta * w;
+            if (m.tool == Tool::Rotate) {
                 Vec3 pw = ce.world.transformPoint(p0);
                 Vec3 r = rotateAxis(rotAxis, angle * w).transformDir(pw - f.origin);
-                out = ce.inv.transformPoint(f.origin + r);
-            } else if (m.tool == Tool::Scale) {
-                Vec3 q = ce.world.transformPoint(p0) - f.origin, q2;
-                for (int i = 0; i < 3; ++i) q2 += f.axis[i] * (dot(q, f.axis[i]) * (1.0f + (scl[i] - 1.0f) * w));
-                out = ce.inv.transformPoint(f.origin + q2);
+                return ce.inv.transformPoint(f.origin + r);
+            }
+            Vec3 q = ce.world.transformPoint(p0) - f.origin, q2;
+            for (int i = 0; i < 3; ++i) q2 += f.axis[i] * (dot(q, f.axis[i]) * (1.0f + (scl[i] - 1.0f) * w));
+            return ce.inv.transformPoint(f.origin + q2);
+        };
+        parallelFor(ce.idx.size(), [&](size_t k) {
+            Vec3 out;
+            const uint8_t mir = ce.mirror.empty() ? 0 : ce.mirror[k];
+            if (mir == 1 && ax >= 0) {
+                Vec3 q = ce.start[k];
+                q[ax] = -q[ax];
+                out = xf(q, ce.w[k]);
+                out[ax] = -out[ax];
+            } else {
+                out = xf(ce.start[k], ce.w[k]);
+                if (mir == 2 && ax >= 0) out[ax] = 0.0f;
             }
             mesh.positions[ce.idx[k]] = out;
         }, 4096);
@@ -965,6 +1082,350 @@ void Viewport::updateHover(int slot, QPoint p)
 }
 
 // ------------------------------------------------------------------------------------------
+// Multi-Cut
+
+bool Viewport::cutPointAt(int slot, QPoint p, SceneObject*& obj, ops::CutPoint& cp, Vec3& world)
+{
+    Hit h = pickSurface(slot, p, 6, false);
+    if (!h.obj || h.cageFace == kInvalid) return false;
+    const Mesh& m = h.obj->mesh();
+    Mat4 w = h.obj->worldMatrix();
+    Vec2 mp{float(p.x()), float(p.y())};
+    // Snap to a face vertex within 10px.
+    for (uint32_t v : m.faceVertices(h.cageFace)) {
+        Vec3 s = project(slot, w.transformPoint(m.positions[v]));
+        if ((Vec2{s.x, s.y} - mp).length() < 10.0f) {
+            obj = h.obj;
+            cp = {v, kInvalid, 0.0f};
+            world = w.transformPoint(m.positions[v]);
+            return true;
+        }
+    }
+    float t = 0.5f;
+    uint32_t e = pickEdge(slot, p, false, obj, &t);
+    if (!obj || e == kInvalid) return false;
+    if (QApplication::keyboardModifiers() & Qt::ShiftModifier) t = std::clamp(std::round(t * 10.0f) / 10.0f, 0.1f, 0.9f);
+    const MeshEdge& ed = obj->mesh().edges[e];
+    cp = {ed.v0, ed.v1, t};
+    world = w.transformPoint(lerp(obj->mesh().positions[ed.v0], obj->mesh().positions[ed.v1], t));
+    return true;
+}
+
+void Viewport::commitCut()
+{
+    if (!cut_.obj || cut_.pts.size() < 2) { cut_ = {}; update(); return; }
+    SceneObject* obj = cut_.obj;
+    auto pts = cut_.pts;
+    cut_ = {};
+    if (!scene_->isSelected(obj->id)) scene_->selectObjects({obj->id}, SelectOp::Replace);
+    if (scene_->mode() == SelectMode::Object) scene_->setMode(SelectMode::Edge);
+    scene_->editMesh(obj, "Multi-Cut", [&](Mesh& m) -> std::optional<std::vector<uint32_t>> {
+        auto edges = ops::multiCut(m, pts);
+        if (scene_->mode() == SelectMode::Edge) return edges;
+        return std::nullopt;
+    });
+    emit message("Multi-Cut applied");
+    update();
+}
+
+// ------------------------------------------------------------------------------------------
+// Quad Draw (retopology on a live surface)
+
+bool Viewport::liveHit(int slot, QPoint p, Vec3& world)
+{
+    return scene_->rayToLive(rayAt(slot, p), world);
+}
+
+SceneObject* Viewport::quadTarget(bool create)
+{
+    if (SceneObject* t = qd_.target ? scene_->find(qd_.target) : nullptr) return t;
+    SceneObject* lead = scene_->lead();
+    if (lead && lead->id != scene_->liveId) {
+        qd_.target = lead->id;
+        return lead;
+    }
+    if (!create) return nullptr;
+    auto o = std::make_unique<SceneObject>();
+    o->id = scene_->allocateId();
+    o->st.name = scene_->uniqueName("retopo1");
+    o->st.mesh = std::make_shared<Mesh>();
+    o->st.mesh->buildTopology();
+    qd_.target = o->id;
+    std::vector<std::unique_ptr<SceneObject>> v;
+    v.push_back(std::move(o));
+    scene_->undo.push(new AddRemoveCommand(scene_, std::move(v), "Create retopology mesh"));
+    return scene_->find(qd_.target);
+}
+
+void Viewport::updateQuadHover(int slot, QPoint p, bool shift)
+{
+    QuadState old = qd_;
+    qd_.hoverVert = qd_.hoverEdge = kInvalid;
+    qd_.preview.clear();
+    SceneObject* t = quadTarget(false);
+    if (!t) { if (old.hoverVert != kInvalid || !old.preview.empty()) update(); return; }
+    const Mesh& m = t->mesh();
+    Mat4 w = t->worldMatrix();
+    Vec2 mp{float(p.x()), float(p.y())};
+    std::vector<Vec2> scr(m.numVerts());
+    float best = 12.0f;
+    for (uint32_t v = 0; v < m.numVerts(); ++v) {
+        Vec3 s = project(slot, w.transformPoint(m.positions[v]));
+        scr[v] = {s.x, s.y};
+        float d = (scr[v] - mp).length();
+        if (d < best) { best = d; qd_.hoverVert = v; }
+    }
+    if (qd_.hoverVert == kInvalid) {
+        float bestE = 8.0f;
+        for (uint32_t e = 0; e < m.numEdges(); ++e) {
+            Vec2 a = scr[m.edges[e].v0], b = scr[m.edges[e].v1], ab = b - a;
+            float l2 = dot(ab, ab);
+            float tt = l2 > 0 ? std::clamp(dot(mp - a, ab) / l2, 0.0f, 1.0f) : 0.0f;
+            float d = (mp - (a + ab * tt)).length();
+            if (d < bestE) { bestE = d; qd_.hoverEdge = e; qd_.hoverT = std::clamp(tt, 0.05f, 0.95f); }
+        }
+    }
+    if (shift) {
+        // Four nearest free vertices (dots or border vertices) around the cursor.
+        std::vector<std::pair<float, uint32_t>> cand;
+        for (uint32_t v = 0; v < m.numVerts(); ++v) {
+            if (!m.vertexFaces(v).empty() && !m.isBorderVertex(v)) continue;
+            float d = (scr[v] - mp).length();
+            if (d < 260.0f) cand.push_back({d, v});
+        }
+        std::sort(cand.begin(), cand.end());
+        if (cand.size() >= 4) {
+            std::vector<uint32_t> q{cand[0].second, cand[1].second, cand[2].second, cand[3].second};
+            Vec2 c;
+            for (uint32_t v : q) c += scr[v];
+            c = c / 4.0f;
+            std::sort(q.begin(), q.end(), [&](uint32_t a, uint32_t b) {
+                return std::atan2(scr[a].y - c.y, scr[a].x - c.x) < std::atan2(scr[b].y - c.y, scr[b].x - c.x);
+            });
+            // Face the camera.
+            Vec3 n, ctr;
+            for (size_t i = 0; i < 4; ++i) {
+                Vec3 a = w.transformPoint(m.positions[q[i]]), b = w.transformPoint(m.positions[q[(i + 1) % 4]]);
+                n += cross(a, b);
+                ctr += a;
+            }
+            const Camera& cam = cams_[size_t(slot)];
+            Vec3 toCam = cam.ortho() ? -cam.forward() : cam.eye() - ctr / 4.0f;
+            if (dot(n, toCam) < 0) std::reverse(q.begin(), q.end());
+            qd_.preview = q;
+        }
+    }
+    if (qd_.hoverVert != old.hoverVert || qd_.hoverEdge != old.hoverEdge || qd_.preview != old.preview) update();
+}
+
+namespace {
+// Runs an op that may drop isolated vertices (dots) and puts the dots back afterwards.
+template <class Fn>
+void keepDots(Mesh& m, Fn fn)
+{
+    if (!m.topologyValid()) m.buildTopology();
+    std::vector<Vec3> dots;
+    for (uint32_t v = 0; v < m.numVerts(); ++v)
+        if (m.vertexFaces(v).empty()) dots.push_back(m.positions[v]);
+    fn(m);
+    bool added = false;
+    for (const Vec3& d : dots) {
+        bool exists = false;
+        for (const Vec3& p : m.positions) exists |= length2(p - d) < 1e-14f;
+        if (!exists) { m.addVertex(d); added = true; }
+    }
+    if (added) m.buildTopology();
+}
+} // namespace
+
+void Viewport::quadPress(int slot, QPoint p, Qt::KeyboardModifiers mods)
+{
+    if (!scene_->liveObject()) { emit message("Quad Draw: make a mesh live first (Mesh Tools > Make Live)"); return; }
+    qd_.pressPos = p;
+    const bool shift = mods & Qt::ShiftModifier, ctrl = mods & Qt::ControlModifier;
+    updateQuadHover(slot, p, shift);
+    SceneObject* t = quadTarget(false);
+    if (tabHeld_ && t && qd_.hoverEdge != kInvalid && t->mesh().isBorderEdge(qd_.hoverEdge)) {
+        drag_ = Drag::QuadExtend;
+        return;
+    }
+    if (shift && !ctrl) {
+        drag_ = Drag::QuadShift; // click = fill quad, drag = relax
+        qd_.touched.clear();
+        qd_.before.clear();
+        return;
+    }
+    if (ctrl && t) {
+        const Mesh& m = t->mesh();
+        if (qd_.hoverVert != kInvalid) {
+            uint32_t v = qd_.hoverVert;
+            scene_->editMesh(t, "Quad Draw: delete vertex", [&](Mesh& mm) -> std::optional<std::vector<uint32_t>> {
+                if (mm.vertexFaces(v).empty()) {
+                    // Remove an isolated dot.
+                    mm.positions.erase(mm.positions.begin() + v);
+                    for (uint32_t& fv : mm.faceVerts) if (fv > v) --fv;
+                    mm.edges.clear();
+                    mm.buildTopology();
+                } else {
+                    keepDots(mm, [&](Mesh& x) { ops::deleteVertices(x, {v}); });
+                }
+                return std::nullopt;
+            });
+        } else if (qd_.hoverEdge != kInvalid && !shift) {
+            auto plan = ops::planEdgeLoop(m, qd_.hoverEdge, qd_.hoverT);
+            if (plan.valid()) {
+                Mat4 w = t->worldMatrix(), inv = w.inverse();
+                scene_->editMesh(t, "Quad Draw: insert loop", [&](Mesh& mm) -> std::optional<std::vector<uint32_t>> {
+                    const uint32_t before = mm.numVerts();
+                    keepDots(mm, [&](Mesh& x) { ops::insertEdgeLoop(x, plan); });
+                    for (uint32_t v = before; v < mm.numVerts(); ++v) {
+                        Vec3 out;
+                        if (scene_->closestOnLive(w.transformPoint(mm.positions[v]), out)) mm.positions[v] = inv.transformPoint(out);
+                    }
+                    mm.touchPositions();
+                    return std::nullopt;
+                });
+            }
+        } else {
+            // Ctrl+Shift+click on a face deletes it.
+            Mat4 w = t->worldMatrix();
+            Vec2 mp{float(p.x()), float(p.y())};
+            for (uint32_t f = 0; f < m.numFaces(); ++f) {
+                auto fv = m.faceVertices(f);
+                bool inside = false;
+                for (size_t i = 0, j = fv.size() - 1; i < fv.size(); j = i++) {
+                    Vec3 a = project(slot, w.transformPoint(m.positions[fv[i]])), b = project(slot, w.transformPoint(m.positions[fv[j]]));
+                    if ((a.y > mp.y) != (b.y > mp.y) && mp.x < (b.x - a.x) * (mp.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+                }
+                if (inside) {
+                    scene_->editMesh(t, "Quad Draw: delete face", [&](Mesh& mm) -> std::optional<std::vector<uint32_t>> {
+                        keepDots(mm, [&](Mesh& x) {
+                            // Keep the face's vertices as dots too.
+                            std::vector<Vec3> fvp;
+                            for (uint32_t v : x.faceVertices(f)) fvp.push_back(x.positions[v]);
+                            ops::deleteFaces(x, {f});
+                            for (const Vec3& d : fvp) {
+                                bool exists = false;
+                                for (const Vec3& q : x.positions) exists |= length2(q - d) < 1e-14f;
+                                if (!exists) x.addVertex(d);
+                            }
+                            x.buildTopology();
+                        });
+                        return std::nullopt;
+                    });
+                    break;
+                }
+            }
+        }
+        updateQuadHover(slot, p, false);
+        return;
+    }
+    if (t && qd_.hoverVert != kInvalid) {
+        drag_ = Drag::QuadVert;
+        qd_.dragVert = qd_.hoverVert;
+        qd_.touched = {qd_.dragVert};
+        qd_.before = {t->mesh().positions[qd_.dragVert]};
+        scene_->dragging = true;
+        return;
+    }
+    Vec3 hit;
+    if (!liveHit(slot, p, hit)) return;
+    SceneObject* target = quadTarget(true);
+    Mat4 inv = target->worldMatrix().inverse();
+    scene_->editMesh(target, "Quad Draw: add point", [&](Mesh& mm) -> std::optional<std::vector<uint32_t>> {
+        mm.addVertex(inv.transformPoint(hit));
+        mm.buildTopology();
+        return std::nullopt;
+    }, true);
+    updateQuadHover(slot, p, false);
+}
+
+void Viewport::quadRelax(int slot, QPoint p)
+{
+    SceneObject* t = quadTarget(false);
+    if (!t) return;
+    Mesh& m = *t->st.mesh;
+    Mat4 w = t->worldMatrix(), inv = w.inverse();
+    Vec2 mp{float(p.x()), float(p.y())};
+    const float radius = 60.0f;
+    std::vector<std::pair<uint32_t, Vec3>> updates;
+    for (uint32_t v = 0; v < m.numVerts(); ++v) {
+        if (m.vertexEdges(v).size() < 2 || m.isBorderVertex(v)) continue;
+        Vec3 s = project(slot, w.transformPoint(m.positions[v]));
+        float d = (Vec2{s.x, s.y} - mp).length();
+        if (d > radius) continue;
+        Vec3 avg;
+        for (uint32_t e : m.vertexEdges(v)) avg += m.positions[m.edgeOther(e, v)];
+        avg = avg / float(m.vertexEdges(v).size());
+        float k = 0.5f * (1.0f - d / radius);
+        Vec3 np = lerp(m.positions[v], avg, k), onLive;
+        if (scene_->closestOnLive(w.transformPoint(np), onLive)) np = inv.transformPoint(onLive);
+        updates.push_back({v, np});
+    }
+    for (auto& [v, np] : updates) {
+        if (std::find(qd_.touched.begin(), qd_.touched.end(), v) == qd_.touched.end()) {
+            qd_.touched.push_back(v);
+            qd_.before.push_back(m.positions[v]);
+        }
+        m.positions[v] = np;
+    }
+    if (!updates.empty()) {
+        m.touchPositions();
+        scene_->notifyChanged();
+    }
+}
+
+void Viewport::quadRelease(QPoint p)
+{
+    SceneObject* t = quadTarget(false);
+    const Drag d = drag_;
+    drag_ = Drag::None;
+    scene_->dragging = false;
+    if (!t) return;
+    Mesh& m = *t->st.mesh;
+    if (d == Drag::QuadShift) {
+        // Plain Shift+click: fill the previewed quad.
+        if (qd_.preview.size() == 4) {
+            auto q = qd_.preview;
+            scene_->editMesh(t, "Quad Draw: fill quad", [&](Mesh& mm) -> std::optional<std::vector<uint32_t>> {
+                mm.addFace(q);
+                mm.buildTopology();
+                return std::nullopt;
+            });
+        }
+    } else if ((d == Drag::QuadVert || d == Drag::QuadRelax) && !qd_.touched.empty()) {
+        VertexMoveCommand::Entry e{t->id, t->st.mesh, qd_.touched, qd_.before, {}};
+        for (uint32_t v : qd_.touched) e.after.push_back(m.positions[v]);
+        std::vector<VertexMoveCommand::Entry> entries;
+        entries.push_back(std::move(e));
+        scene_->undo.push(new VertexMoveCommand(scene_, std::move(entries), d == Drag::QuadVert ? "Quad Draw: move" : "Quad Draw: relax"));
+    } else if (d == Drag::QuadExtend && qd_.hoverEdge != kInvalid && qd_.hoverEdge < m.numEdges()) {
+        Vec3 hit;
+        if (liveHit(dragSlot_, p, hit)) {
+            Mat4 w = t->worldMatrix(), inv = w.inverse();
+            const MeshEdge ed = m.edges[qd_.hoverEdge];
+            Vec3 a = w.transformPoint(m.positions[ed.v0]), b = w.transformPoint(m.positions[ed.v1]);
+            Vec3 off = hit - (a + b) * 0.5f, a2 = a + off, b2 = b + off, tmp;
+            if (scene_->closestOnLive(a2, tmp)) a2 = tmp;
+            if (scene_->closestOnLive(b2, tmp)) b2 = tmp;
+            const Camera& cam = cams_[size_t(dragSlot_)];
+            scene_->editMesh(t, "Quad Draw: extend", [&](Mesh& mm) -> std::optional<std::vector<uint32_t>> {
+                uint32_t na = mm.addVertex(inv.transformPoint(a2)), nb = mm.addVertex(inv.transformPoint(b2));
+                std::vector<uint32_t> q{ed.v0, ed.v1, nb, na};
+                Vec3 n = cross(b - a, a2 - a), toCam = cam.ortho() ? -cam.forward() : cam.eye() - a;
+                if (dot(n, toCam) < 0) std::reverse(q.begin(), q.end());
+                mm.addFace(q);
+                mm.buildTopology();
+                return std::nullopt;
+            });
+        }
+    }
+    qd_.touched.clear();
+    qd_.before.clear();
+    updateQuadHover(dragSlot_, p, false);
+}
+
+// ------------------------------------------------------------------------------------------
 // Input
 
 void Viewport::mousePressEvent(QMouseEvent* e)
@@ -984,6 +1445,10 @@ void Viewport::mousePressEvent(QMouseEvent* e)
         else if (e->button() == Qt::MiddleButton) drag_ = Drag::Track;
         return;
     }
+    if (e->button() == Qt::RightButton && scene_->tool() == Tool::MultiCut && cut_.pts.size() >= 2) {
+        commitCut();
+        return;
+    }
     if (e->button() == Qt::RightButton) {
         int kind = (e->modifiers() & Qt::ShiftModifier) ? 1 : (e->modifiers() & Qt::ControlModifier) ? 2 : 0;
         uint32_t under = 0;
@@ -1001,6 +1466,62 @@ void Viewport::mousePressEvent(QMouseEvent* e)
         return;
     }
     const Tool tool = scene_->tool();
+    if (e->button() == Qt::LeftButton && tool == Tool::QuadDraw) {
+        quadPress(slot, p, e->modifiers());
+        return;
+    }
+    if (e->button() == Qt::LeftButton && tool == Tool::MultiCut) {
+        SceneObject* obj = nullptr;
+        ops::CutPoint cp;
+        Vec3 world;
+        if (cutPointAt(slot, p, obj, cp, world)) {
+            if (e->modifiers() & Qt::ControlModifier && cp.b != kInvalid) {
+                // Ctrl+click: full edge loop through this edge.
+                uint32_t edge = obj->mesh().findEdge(cp.a, cp.b);
+                float t = obj->mesh().edges[edge].v0 == cp.a ? cp.t : 1.0f - cp.t;
+                auto plan = ops::planEdgeLoop(obj->mesh(), edge, t);
+                if (!scene_->isSelected(obj->id)) scene_->selectObjects({obj->id}, SelectOp::Replace);
+                if (scene_->mode() == SelectMode::Object) scene_->setMode(SelectMode::Edge);
+                scene_->editMesh(obj, "Insert Edge Loop", [&](Mesh& m) -> std::optional<std::vector<uint32_t>> {
+                    auto edges = ops::insertEdgeLoop(m, plan);
+                    if (scene_->mode() == SelectMode::Edge) return edges;
+                    return std::nullopt;
+                });
+                cut_ = {};
+                return;
+            }
+            if (cut_.obj != obj) cut_ = {};
+            cut_.obj = obj;
+            if (cut_.pts.empty() || cut_.pts.back().a != cp.a || cut_.pts.back().b != cp.b || cut_.pts.back().t != cp.t) {
+                cut_.pts.push_back(cp);
+                cut_.world.push_back(world);
+            }
+            update();
+        }
+        return;
+    }
+    if (e->button() == Qt::LeftButton && tool == Tool::TargetWeld) {
+        SceneObject* obj = nullptr;
+        uint32_t v = kInvalid;
+        if (!scene_->selectedObjects().empty()) v = pickVertex(slot, p, obj);
+        if (v == kInvalid) {
+            Hit h = pickSurface(slot, p, 6, false);
+            if (h.obj && h.cageFace != kInvalid) {
+                float best = 25.0f;
+                Mat4 w = h.obj->worldMatrix();
+                for (uint32_t fv : h.obj->mesh().faceVertices(h.cageFace)) {
+                    Vec3 s = project(slot, w.transformPoint(h.obj->mesh().positions[fv]));
+                    float d = (Vec2{s.x, s.y} - Vec2{float(p.x()), float(p.y())}).length();
+                    if (d < best) { best = d; v = fv; obj = h.obj; }
+                }
+            }
+        }
+        if (obj && v != kInvalid) {
+            weld_ = {obj, v, kInvalid};
+            drag_ = Drag::Weld;
+        }
+        return;
+    }
     if (e->button() == Qt::LeftButton && tool == Tool::InsertEdgeLoop) {
         updateLoopPreview(slot, p);
         if (loop_.obj && loop_.plan.valid()) drag_ = Drag::LoopSlide;
@@ -1040,6 +1561,42 @@ void Viewport::mouseMoveEvent(QMouseEvent* e)
         break;
     case Drag::Menu: emit markingMenuTrack(e->globalPosition().toPoint()); break;
     case Drag::LoopSlide: updateLoopPreview(dragSlot_, p, true); break;
+    case Drag::Weld: {
+        weld_.dst = kInvalid;
+        if (weld_.obj) {
+            const Mesh& m = weld_.obj->mesh();
+            Mat4 w = weld_.obj->worldMatrix();
+            float best = 15.0f;
+            for (uint32_t v = 0; v < m.numVerts(); ++v) {
+                if (v == weld_.src) continue;
+                Vec3 s = project(dragSlot_, w.transformPoint(m.positions[v]));
+                float d = (Vec2{s.x, s.y} - Vec2{float(p.x()), float(p.y())}).length();
+                if (d < best) { best = d; weld_.dst = v; }
+            }
+        }
+        update();
+        break;
+    }
+    case Drag::QuadVert: {
+        SceneObject* t = quadTarget(false);
+        Vec3 hit;
+        if (t && liveHit(dragSlot_, p, hit) && qd_.dragVert < t->mesh().numVerts()) {
+            t->st.mesh->positions[qd_.dragVert] = t->worldMatrix().inverse().transformPoint(hit);
+            t->st.mesh->touchPositions();
+            scene_->notifyChanged();
+        }
+        break;
+    }
+    case Drag::QuadShift:
+        if ((p - qd_.pressPos).manhattanLength() > 5) {
+            drag_ = Drag::QuadRelax;
+            scene_->dragging = true;
+            quadRelax(dragSlot_, p);
+        }
+        break;
+    case Drag::QuadRelax: quadRelax(dragSlot_, p); update(); break;
+    case Drag::QuadExtend: update(); break;
+    case Drag::Cut: break;
     case Drag::None: {
         int slot = slotAt(p);
         Tool t = scene_->tool();
@@ -1050,7 +1607,12 @@ void Viewport::mouseMoveEvent(QMouseEvent* e)
             if (h != Handle::None) break;
         }
         if (t == Tool::InsertEdgeLoop) updateLoopPreview(slot, p);
-        else updateHover(slot, p);
+        else if (t == Tool::QuadDraw) updateQuadHover(slot, p, e->modifiers() & Qt::ShiftModifier);
+        else if (t == Tool::MultiCut) {
+            SceneObject* obj = nullptr;
+            cut_.hoverValid = cutPointAt(slot, p, obj, cut_.hover, cut_.hoverWorld) && (!cut_.obj || obj == cut_.obj);
+            update();
+        } else updateHover(slot, p);
         break;
     }
     }
@@ -1069,6 +1631,26 @@ void Viewport::mouseReleaseEvent(QMouseEvent* e)
         break;
     }
     case Drag::Manip: endManip(); break;
+    case Drag::Weld: {
+        drag_ = Drag::None;
+        if (weld_.obj && weld_.src != kInvalid && weld_.dst != kInvalid) {
+            uint32_t src = weld_.src, dst = weld_.dst;
+            scene_->editMesh(weld_.obj, "Target Weld", [&](Mesh& m) -> std::optional<std::vector<uint32_t>> {
+                ops::mergeInto(m, src, dst);
+                return std::nullopt;
+            });
+            emit message("Target Weld");
+        }
+        weld_ = {};
+        update();
+        break;
+    }
+    case Drag::QuadVert:
+    case Drag::QuadRelax:
+    case Drag::QuadShift:
+    case Drag::QuadExtend:
+        quadRelease(p);
+        break;
     case Drag::Menu:
         drag_ = Drag::None;
         emit markingMenuRelease(e->globalPosition().toPoint());
@@ -1117,6 +1699,43 @@ void Viewport::wheelEvent(QWheelEvent* e)
     int slot = slotAt(e->position().toPoint());
     cams_[size_t(slot)].dolly(float(e->angleDelta().y()) / 120.0f * 0.12f);
     update();
+}
+
+bool Viewport::event(QEvent* e)
+{
+    // Keys the active tool needs that would otherwise be eaten by focus chaining or menu shortcuts.
+    if (e->type() == QEvent::ShortcutOverride || e->type() == QEvent::KeyPress || e->type() == QEvent::KeyRelease) {
+        auto* ke = static_cast<QKeyEvent*>(e);
+        const int k = ke->key();
+        if (k == Qt::Key_Tab && scene_->tool() == Tool::QuadDraw) {
+            if (e->type() == QEvent::KeyPress && !ke->isAutoRepeat()) tabHeld_ = true;
+            if (e->type() == QEvent::KeyRelease && !ke->isAutoRepeat()) tabHeld_ = false;
+            e->accept();
+            return true;
+        }
+        if (scene_->tool() == Tool::MultiCut && (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Escape || k == Qt::Key_Backspace)) {
+            if (e->type() == QEvent::ShortcutOverride) { e->accept(); return true; }
+            if (e->type() == QEvent::KeyPress) {
+                if (k == Qt::Key_Escape) cut_ = {};
+                else if (k == Qt::Key_Backspace) {
+                    if (!cut_.pts.empty()) { cut_.pts.pop_back(); cut_.world.pop_back(); }
+                    if (cut_.pts.empty()) cut_.obj = nullptr;
+                } else commitCut();
+                update();
+                return true;
+            }
+        }
+        if (e->type() == QEvent::KeyRelease && k == Qt::Key_Shift && scene_->tool() == Tool::QuadDraw) {
+            qd_.preview.clear();
+            update();
+        }
+        if (e->type() == QEvent::KeyPress && k == Qt::Key_Shift && scene_->tool() == Tool::QuadDraw) {
+            QOpenGLWidget::event(e);
+            updateQuadHover(slotAt(mousePos_), mousePos_, true);
+            return true;
+        }
+    }
+    return QOpenGLWidget::event(e);
 }
 
 void Viewport::keyPressEvent(QKeyEvent* e)

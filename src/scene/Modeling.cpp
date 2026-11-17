@@ -1,6 +1,8 @@
 #include "scene/Modeling.h"
 #include "scene/Commands.h"
 #include "mesh/ObjIO.h"
+#include "mesh/UVOps.h"
+#include "io/Fbx.h"
 #include "mesh/Primitives.h"
 
 #include <QFileInfo>
@@ -551,6 +553,252 @@ QString setComponentMode(Scene& s, SelectMode m)
 }
 
 // ------------------------------------------------------------------------------------------
+
+// ------------------------------------------------------------------------------------------
+// Bevel / Bridge
+
+QString bevel(Scene& s, float offset, int segments, bool round)
+{
+    if (s.mode() == SelectMode::Object) return "Bevel: select edges (F10) or faces";
+    int n = 0;
+    s.undo.beginMacro("Bevel");
+    for (SceneObject* o : hilited(s)) {
+        auto items = o->compList(s.mode());
+        if (items.empty()) continue;
+        std::vector<uint32_t> edges = s.mode() == SelectMode::Edge ? items : ops::convert(o->mesh(), s.compType(), items, ops::Comp::Edge);
+        // Scale the offset into object space so it behaves like a world distance.
+        float sc = std::max({std::abs(o->st.scale.x), std::abs(o->st.scale.y), std::abs(o->st.scale.z), 1e-6f});
+        s.editMesh(o, "Bevel", [&](Mesh& m) {
+            auto faces = ops::bevelEdges(m, edges, {offset / sc, segments, round});
+            n += int(faces.size());
+            if (s.mode() == SelectMode::Face) return std::optional<std::vector<uint32_t>>(faces);
+            return std::optional<std::vector<uint32_t>>(std::vector<uint32_t>{});
+        });
+    }
+    s.undo.endMacro();
+    return n ? QString("Bevelled (%1 new faces, offset %2, %3 segment(s))").arg(n).arg(offset).arg(segments) : "Bevel: nothing to bevel (needs manifold edges)";
+}
+
+QString bridge(Scene& s, int divisions)
+{
+    if (s.mode() != SelectMode::Edge && s.mode() != SelectMode::Face) return "Bridge: select two border edge loops (F10) or two face regions (F11)";
+    int made = 0;
+    std::vector<std::pair<SceneObject*, Mesh>> results;
+    for (SceneObject* o : hilited(s)) {
+        auto items = o->compList(s.mode());
+        if (items.empty()) continue;
+        Mesh trial = o->mesh();
+        auto f = s.mode() == SelectMode::Face ? ops::bridgeFaces(trial, items, divisions) : ops::bridgeEdges(trial, items, divisions);
+        if (f.empty()) continue; // invalid input: leave this object untouched
+        made += int(f.size());
+        results.emplace_back(o, std::move(trial));
+    }
+    if (!made) return "Bridge: needs exactly two border chains with the same number of edges";
+    s.undo.beginMacro("Bridge");
+    for (auto& [o, mesh] : results)
+        s.editMesh(o, "Bridge", [&](Mesh& m) {
+            m = std::move(mesh);
+            return std::optional<std::vector<uint32_t>>(std::vector<uint32_t>{});
+        });
+    s.undo.endMacro();
+    return QString("Bridged (%1 faces)").arg(made);
+}
+
+// ------------------------------------------------------------------------------------------
+// UVs
+
+namespace {
+std::vector<uint32_t> selectedFacesOrAll(Scene& s, SceneObject* o)
+{
+    if (s.mode() == SelectMode::Face) return o->sel.faces;
+    if (s.mode() != SelectMode::Object) return ops::convert(o->mesh(), s.compType(), o->compList(s.mode()), ops::Comp::Face);
+    return {};
+}
+// UV selection for an object: explicit UV-editor selection, else uvs of selected faces, else all.
+std::vector<uint32_t> uvSelection(Scene& s, SceneObject* o)
+{
+    const Mesh& m = o->mesh();
+    std::vector<uint32_t> sel;
+    for (uint32_t u : o->sel.uvs)
+        if (u < m.uvs.size()) sel.push_back(u);
+    if (!sel.empty()) return sel;
+    auto faces = selectedFacesOrAll(s, o);
+    return faces.empty() ? std::vector<uint32_t>{} : uv::uvsOfFaces(m, faces);
+}
+template <class Fn>
+QString uvEdit(Scene& s, const QString& label, Fn fn)
+{
+    auto objs = hilited(s);
+    if (objs.empty()) return label + ": select a mesh";
+    s.undo.beginMacro(label);
+    for (SceneObject* o : objs) {
+        auto keep = o->compList(s.mode() == SelectMode::Object ? SelectMode::Face : s.mode());
+        s.editMesh(o, label, [&](Mesh& m) {
+            fn(s, o, m);
+            m.touchUVs();
+            if (s.mode() == SelectMode::Object) return std::optional<std::vector<uint32_t>>(std::nullopt);
+            return std::optional<std::vector<uint32_t>>(keep);
+        }, true);
+        o->sel.uvs.clear();
+    }
+    s.undo.endMacro();
+    return label;
+}
+} // namespace
+
+QString projectUVs(Scene& s, Projection p)
+{
+    static const char* names[] = {"Planar X", "Planar Y", "Planar Z", "Planar (best plane)", "Cylindrical", "Spherical", "Automatic"};
+    return uvEdit(s, QString("%1 projection").arg(names[int(p)]), [p](Scene& sc, SceneObject* o, Mesh& m) {
+        auto faces = selectedFacesOrAll(sc, o);
+        switch (p) {
+        case Projection::PlanarX: uv::planar(m, faces, uv::Axis::X); break;
+        case Projection::PlanarY: uv::planar(m, faces, uv::Axis::Y); break;
+        case Projection::PlanarZ: uv::planar(m, faces, uv::Axis::Z); break;
+        case Projection::PlanarBest: uv::planar(m, faces, uv::Axis::Best); break;
+        case Projection::Cylindrical: uv::cylindrical(m, faces); break;
+        case Projection::Spherical: uv::spherical(m, faces); break;
+        case Projection::Automatic: uv::automatic(m, faces); break;
+        }
+    });
+}
+
+QString cutUVs(Scene& s)
+{
+    if (s.mode() != SelectMode::Edge) return "Cut UVs: select edges (F10)";
+    return uvEdit(s, "Cut UV Edges", [](Scene&, SceneObject* o, Mesh& m) { m.ensureUVs(); uv::cutEdges(m, o->sel.edges); });
+}
+
+QString sewUVs(Scene& s)
+{
+    if (s.mode() != SelectMode::Edge) return "Sew UVs: select edges (F10)";
+    return uvEdit(s, "Move and Sew UVs", [](Scene&, SceneObject* o, Mesh& m) { uv::sewEdges(m, o->sel.edges); });
+}
+
+QString unfoldUVs(Scene& s)
+{
+    int shells = 0;
+    QString r = uvEdit(s, "Unfold", [&](Scene& sc, SceneObject* o, Mesh& m) { shells += uv::unfold(m, uvSelection(sc, o)); });
+    return QString("Unfolded %1 shell(s) (LSCM)").arg(shells);
+}
+
+QString layoutUVs(Scene& s)
+{
+    return uvEdit(s, "Layout UVs", [](Scene&, SceneObject*, Mesh& m) { uv::layout(m); });
+}
+
+QString normalizeUVs(Scene& s)
+{
+    return uvEdit(s, "Normalize UVs", [](Scene& sc, SceneObject* o, Mesh& m) { uv::normalize(m, uvSelection(sc, o)); });
+}
+
+QString flipUVs(Scene& s, bool horizontal)
+{
+    return uvEdit(s, horizontal ? "Flip U" : "Flip V", [horizontal](Scene& sc, SceneObject* o, Mesh& m) {
+        uv::flip(m, uv::expandToShells(m, uvSelection(sc, o)), horizontal);
+    });
+}
+
+QString rotateUVs(Scene& s, float degrees)
+{
+    return uvEdit(s, QString("Rotate UVs %1°").arg(degrees), [degrees](Scene& sc, SceneObject* o, Mesh& m) {
+        uv::rotate(m, uv::expandToShells(m, uvSelection(sc, o)), degrees);
+    });
+}
+
+// ------------------------------------------------------------------------------------------
+// Retopology
+
+QString toggleLive(Scene& s)
+{
+    SceneObject* o = s.lead();
+    if (s.liveId && (!o || o->id == s.liveId)) {
+        s.liveId = 0;
+        s.notifyChanged();
+        return "Live surface cleared";
+    }
+    if (!o) return "Make Live: select the high-poly mesh to draw on";
+    s.liveId = o->id;
+    s.selectObjects({}, SelectOp::Replace);
+    s.notifyChanged();
+    return QString("%1 is live — use Quad Draw to retopologize it").arg(o->st.name);
+}
+
+QString conform(Scene& s)
+{
+    if (!s.liveObject()) return "Conform: make a mesh live first";
+    int moved = 0;
+    s.undo.beginMacro("Conform");
+    for (SceneObject* o : hilited(s)) {
+        if (o->id == s.liveId) continue;
+        std::vector<uint32_t> verts = s.mode() == SelectMode::Object ? std::vector<uint32_t>{} : s.selectedVerts(o);
+        Mat4 w = o->worldMatrix(), inv = w.inverse();
+        auto keep = o->compList(s.mode() == SelectMode::Object ? SelectMode::Face : s.mode());
+        s.editMesh(o, "Conform", [&](Mesh& m) {
+            auto project = [&](uint32_t v) {
+                Vec3 out;
+                if (s.closestOnLive(w.transformPoint(m.positions[v]), out)) { m.positions[v] = inv.transformPoint(out); ++moved; }
+            };
+            if (verts.empty()) for (uint32_t v = 0; v < m.numVerts(); ++v) project(v);
+            else for (uint32_t v : verts) project(v);
+            m.touchPositions();
+            return s.mode() == SelectMode::Object ? std::optional<std::vector<uint32_t>>(std::nullopt) : std::optional<std::vector<uint32_t>>(keep);
+        });
+    }
+    s.undo.endMacro();
+    return QString("Conformed %1 vertices to the live surface").arg(moved);
+}
+
+// ------------------------------------------------------------------------------------------
+// FBX
+
+QString importFbx(Scene& s, const QString& path)
+{
+    std::vector<FbxMesh> meshes;
+    std::string err;
+    if (!readFbx(path.toStdString(), meshes, &err)) return "FBX import failed: " + QString::fromStdString(err);
+    std::vector<std::unique_ptr<SceneObject>> v;
+    for (auto& fm : meshes) {
+        // Game-engine style exports split vertices along UV/normal seams; weld them so the mesh is editable.
+        float size = std::max(length(fm.mesh.bounds().size()), 1e-6f);
+        ops::mergeByDistance(fm.mesh, {}, size * 1e-6f);
+        QString name = QString::fromStdString(fm.name);
+        if (name.isEmpty()) name = QFileInfo(path).baseName();
+        auto o = makeObject(s, name, std::move(fm.mesh));
+        if (o->st.name != name) {
+            bool clash = false;
+            for (auto& other : s.objects) clash |= other->st.name == name;
+            if (!clash) o->st.name = name;
+        }
+        o->st.translate = fm.translate;
+        o->st.rotate = fm.rotate;
+        o->st.scale = fm.scale;
+        v.push_back(std::move(o));
+    }
+    size_t n = v.size();
+    if (s.mode() != SelectMode::Object) s.setMode(SelectMode::Object);
+    s.undo.push(new AddRemoveCommand(&s, std::move(v), "Import FBX"));
+    return QString("Imported %1 mesh(es) from %2").arg(n).arg(QFileInfo(path).fileName());
+}
+
+QString exportFbx(Scene& s, const QString& path, bool selectedOnly)
+{
+    std::vector<FbxMesh> out;
+    for (auto& o : s.objects) {
+        if (selectedOnly && !s.isSelected(o->id)) continue;
+        out.push_back({o->st.name.toStdString(), o->mesh(), o->st.translate, o->st.rotate, o->st.scale});
+    }
+    if (out.empty()) return "Export: nothing to export";
+    std::string err;
+    if (!writeFbx(path.toStdString(), out, &err)) return "FBX export failed: " + QString::fromStdString(err);
+    return QString("Exported %1 mesh(es) to %2 (FBX 7.4 binary)").arg(out.size()).arg(QFileInfo(path).fileName());
+}
+
+QString importFile(Scene& s, const QString& path)
+{
+    if (path.endsWith(".fbx", Qt::CaseInsensitive)) return importFbx(s, path);
+    return importObj(s, path);
+}
 
 QString importObj(Scene& s, const QString& path)
 {

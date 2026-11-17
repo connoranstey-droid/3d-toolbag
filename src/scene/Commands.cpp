@@ -105,6 +105,25 @@ void VertexMoveCommand::apply(bool after)
     scene_->notifyChanged();
 }
 
+UVMoveCommand::UVMoveCommand(Scene* scene, std::vector<Entry> entries, const QString& text)
+    : QUndoCommand(text), scene_(scene), entries_(std::move(entries))
+{
+}
+
+void UVMoveCommand::apply(bool after)
+{
+    for (auto& e : entries_) {
+        const auto& src = after ? e.after : e.before;
+        for (size_t i = 0; i < e.indices.size(); ++i)
+            if (e.indices[i] < e.mesh->uvs.size()) e.mesh->uvs[e.indices[i]] = src[i];
+        e.mesh->touchUVs();
+    }
+    scene_->notifyChanged();
+}
+
+void UVMoveCommand::undo() { apply(false); }
+void UVMoveCommand::redo() { apply(true); }
+
 void VertexMoveCommand::undo() { apply(false); }
 void VertexMoveCommand::redo() { apply(true); }
 

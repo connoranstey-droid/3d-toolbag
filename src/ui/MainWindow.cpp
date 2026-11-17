@@ -3,13 +3,21 @@
 #include "ui/ChannelBox.h"
 #include "ui/MarkingMenu.h"
 #include "ui/Outliner.h"
+#include "ui/UVEditor.h"
 #include "viewport/Viewport.h"
 
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QCloseEvent>
 #include <QDialog>
+#include <QPushButton>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -20,6 +28,7 @@
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -112,9 +121,17 @@ void MainWindow::buildMenus()
     addAct(file, "&Save Scene", {QKeySequence("Ctrl+S")}, [this] { saveScene(false); return QString(); });
     addAct(file, "Save Scene &As...", {QKeySequence("Ctrl+Shift+S")}, [this] { saveScene(true); return QString(); });
     file->addSeparator();
-    addAct(file, "&Import OBJ...", {}, [this] {
-        QString p = QFileDialog::getOpenFileName(this, "Import OBJ", {}, "Wavefront OBJ (*.obj)");
-        return p.isEmpty() ? QString() : M::importObj(*scene_, p);
+    addAct(file, "&Import (FBX / OBJ)...", {QKeySequence("Ctrl+I")}, [this] {
+        QString p = QFileDialog::getOpenFileName(this, "Import", {}, "Meshes (*.fbx *.obj);;FBX (*.fbx);;Wavefront OBJ (*.obj)");
+        return p.isEmpty() ? QString() : M::importFile(*scene_, p);
+    });
+    addAct(file, "Export Selection to &FBX...", {}, [this] {
+        QString p = QFileDialog::getSaveFileName(this, "Export Selection", "selection.fbx", "FBX (*.fbx)");
+        return p.isEmpty() ? QString() : M::exportFbx(*scene_, p, true);
+    });
+    addAct(file, "Export All to F&BX...", {}, [this] {
+        QString p = QFileDialog::getSaveFileName(this, "Export All", "scene.fbx", "FBX (*.fbx)");
+        return p.isEmpty() ? QString() : M::exportFbx(*scene_, p, false);
     });
     addAct(file, "Export &Selection to OBJ...", {}, [this] {
         QString p = QFileDialog::getSaveFileName(this, "Export Selection", "selection.obj", "Wavefront OBJ (*.obj)");
@@ -213,14 +230,20 @@ void MainWindow::buildMenus()
     // ---- Modify ----
     QMenu* mod = add("&Modify");
     toolGroup_ = new QActionGroup(this);
-    const char* toolNames[] = {"&Select Tool", "&Move Tool", "&Rotate Tool", "S&cale Tool", "Insert &Edge Loop Tool"};
-    const char* toolKeys[] = {"Q", "W", "E", "R", ""};
-    for (int i = 0; i < 5; ++i) {
+    const char* toolNames[] = {"&Select Tool", "&Move Tool", "&Rotate Tool", "S&cale Tool", "Insert &Edge Loop Tool", "&Multi-Cut Tool",
+                               "&Target Weld Tool", "&Quad Draw Tool"};
+    const char* toolKeys[] = {"Q", "W", "E", "R", "", "", "", ""};
+    for (int i = 0; i < 8; ++i) {
         Tool t = Tool(i);
         QList<QKeySequence> keys;
         if (toolKeys[i][0]) keys << QKeySequence(toolKeys[i]);
         toolActs_[i] = addAct(i < 4 ? mod : nullptr, toolNames[i], keys, [this, t] {
-            if (t == Tool::InsertEdgeLoop && scene_->mode() == SelectMode::Object && scene_->lead()) scene_->setMode(SelectMode::Edge);
+            if ((t == Tool::InsertEdgeLoop || t == Tool::MultiCut) && scene_->mode() == SelectMode::Object && scene_->lead()) scene_->setMode(SelectMode::Edge);
+            if (t == Tool::TargetWeld && scene_->mode() == SelectMode::Object && scene_->lead()) scene_->setMode(SelectMode::Vertex);
+            if (t == Tool::QuadDraw) {
+                if (scene_->mode() != SelectMode::Object) scene_->setMode(SelectMode::Object);
+                if (!scene_->liveObject()) report("Quad Draw: make the high-poly mesh live first (Mesh Tools > Make Live)");
+            }
             scene_->setTool(t);
             return QString();
         });
@@ -257,7 +280,19 @@ void MainWindow::buildMenus()
     QMenu* disp = add("&Display");
     auto* shadeGroup = new QActionGroup(this);
     QAction* wire = addAct(disp, "&Wireframe", {QKeySequence("4")}, [this] { viewport_->options.shading = ShadingMode::Wireframe; viewport_->update(); return QString(); });
-    QAction* shaded = addAct(disp, "&Smooth Shade All", {QKeySequence("5"), QKeySequence("6")}, [this] { viewport_->options.shading = ShadingMode::Shaded; viewport_->update(); return QString(); });
+    QAction* shaded = addAct(disp, "&Smooth Shade All", {QKeySequence("5")}, [this] {
+        viewport_->options.shading = ShadingMode::Shaded;
+        if (checkerAct_) checkerAct_->setChecked(false);
+        viewport_->update();
+        return QString();
+    });
+    checkerAct_ = addAct(disp, "UV Checker (Textured)", {QKeySequence("6")}, nullptr);
+    checkerAct_->setCheckable(true);
+    connect(checkerAct_, &QAction::toggled, this, [this](bool on) {
+        viewport_->options.textured = on;
+        if (on) viewport_->options.shading = ShadingMode::Shaded;
+        viewport_->update();
+    });
     wire->setCheckable(true);
     shaded->setCheckable(true);
     shaded->setChecked(true);
@@ -320,6 +355,15 @@ void MainWindow::buildMenus()
     keep->setCheckable(true);
     keep->setChecked(true);
     connect(keep, &QAction::toggled, this, [this](bool on) { keepFacesTogether_ = on; });
+    addAct(em, "&Bevel", {QKeySequence("Ctrl+B")}, [this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); }, true);
+    addAct(em, "Bevel Options...", {}, [this] { bevelOptions(); return QString(); });
+    addAct(em, "B&ridge", {}, [this] { return M::bridge(*scene_, bridgeDivisions_); }, true);
+    addAct(em, "Bridge Divisions...", {}, [this] {
+        bool ok = false;
+        int d = QInputDialog::getInt(this, "Bridge", "Divisions:", bridgeDivisions_, 0, 100, 1, &ok);
+        if (ok) bridgeDivisions_ = d;
+        return QString();
+    });
     em->addSeparator();
     addAct(em, "&Merge", {}, [this] { return M::mergeVertices(*scene_, mergeThreshold_); }, true);
     addAct(em, "Merge Threshold...", {}, [this] {
@@ -342,7 +386,24 @@ void MainWindow::buildMenus()
 
     // ---- Mesh Tools ----
     QMenu* mt = add("Mesh &Tools");
-    mt->addAction(toolActs_[4]);
+    for (int i = 4; i < 8; ++i) mt->addAction(toolActs_[i]);
+    mt->addSeparator();
+    addAct(mt, "Make &Live (toggle)", {}, [&s] { return M::toggleLive(s); });
+    addAct(mt, "&Conform to Live Surface", {}, [&s] { return M::conform(s); }, true);
+    mt->addSeparator();
+    QMenu* sym = mt->addMenu("&Symmetry");
+    auto* symGroup = new QActionGroup(this);
+    const char* symNames[] = {"Off", "Object X", "Object Y", "Object Z"};
+    for (int i = 0; i < 4; ++i) {
+        QAction* a = addAct(sym, symNames[i], {}, [this, i] {
+            scene_->symmetry = i - 1;
+            if (auto* c = findChild<QComboBox*>("symmetryCombo")) c->setCurrentIndex(i);
+            return QString("Symmetry: %1").arg(i == 0 ? "off" : QString("object %1").arg(QChar("XYZ"[i - 1])));
+        });
+        a->setCheckable(true);
+        a->setChecked(i == 0);
+        symGroup->addAction(a);
+    }
 
     // ---- Mesh Display ----
     QMenu* md = add("Mesh &Display");
@@ -353,6 +414,27 @@ void MainWindow::buildMenus()
     addAct(md, "Smooth Preview: Smooth", {QKeySequence("3")}, [&s] { return M::setSmoothDisplay(s, 2); });
     addAct(md, "Increase Smooth Level", {QKeySequence(Qt::Key_PageUp)}, [&s] { return M::changeSmoothLevel(s, 1); });
     addAct(md, "Decrease Smooth Level", {QKeySequence(Qt::Key_PageDown)}, [&s] { return M::changeSmoothLevel(s, -1); });
+
+    // ---- UV ----
+    QMenu* uvm = add("&UV");
+    addAct(uvm, "&Planar (best plane)", {}, [&s] { return M::projectUVs(s, M::Projection::PlanarBest); }, true);
+    addAct(uvm, "Planar X", {}, [&s] { return M::projectUVs(s, M::Projection::PlanarX); }, true);
+    addAct(uvm, "Planar Y", {}, [&s] { return M::projectUVs(s, M::Projection::PlanarY); }, true);
+    addAct(uvm, "Planar Z", {}, [&s] { return M::projectUVs(s, M::Projection::PlanarZ); }, true);
+    addAct(uvm, "&Cylindrical", {}, [&s] { return M::projectUVs(s, M::Projection::Cylindrical); }, true);
+    addAct(uvm, "&Spherical", {}, [&s] { return M::projectUVs(s, M::Projection::Spherical); }, true);
+    addAct(uvm, "&Automatic", {}, [&s] { return M::projectUVs(s, M::Projection::Automatic); }, true);
+    uvm->addSeparator();
+    addAct(uvm, "Cu&t UV Edges", {}, [&s] { return M::cutUVs(s); }, true);
+    addAct(uvm, "Move and S&ew", {}, [&s] { return M::sewUVs(s); }, true);
+    addAct(uvm, "&Unfold", {}, [&s] { return M::unfoldUVs(s); }, true);
+    addAct(uvm, "&Layout", {}, [&s] { return M::layoutUVs(s); }, true);
+    addAct(uvm, "&Normalize", {}, [&s] { return M::normalizeUVs(s); }, true);
+    addAct(uvm, "Flip U", {}, [&s] { return M::flipUVs(s, true); }, true);
+    addAct(uvm, "Flip V", {}, [&s] { return M::flipUVs(s, false); }, true);
+    addAct(uvm, "Rotate 90°", {}, [&s] { return M::rotateUVs(s, 90.0f); }, true);
+    uvm->addSeparator();
+    addAct(uvm, "UV &Editor", {QKeySequence("Ctrl+Shift+U")}, [this] { openUVEditor(); return QString(); });
 
     // ---- Help ----
     QMenu* help = add("Hel&p");
@@ -374,6 +456,14 @@ void MainWindow::buildStatusLine()
     for (int i = 0; i < 4; ++i) tb->addAction(modeActs_[i]);
     tb->addSeparator();
     tb->addAction(softAct_);
+    tb->addSeparator();
+    tb->addWidget(new QLabel(" Symmetry: "));
+    auto* symCombo = new QComboBox;
+    symCombo->setObjectName("symmetryCombo");
+    symCombo->addItems({"Off", "Object X", "Object Y", "Object Z"});
+    symCombo->setFocusPolicy(Qt::NoFocus);
+    connect(symCombo, &QComboBox::currentIndexChanged, this, [this](int i) { scene_->symmetry = i - 1; });
+    tb->addWidget(symCombo);
     tb->addSeparator();
     auto* undoBtn = tb->addAction("Undo", [this] { scene_->undo.undo(); });
     auto* redoBtn = tb->addAction("Redo", [this] { scene_->undo.redo(); });
@@ -433,6 +523,40 @@ void MainWindow::buildShelf()
         {"Uncrease", "Remove crease", [&s] { return M::setCrease(s, 0.0f); }},
         {"Triangulate", "Triangulate", [&s] { return M::triangulate(s); }},
     });
+    shelf("Tools", {
+        {"Bevel", "Bevel selected edges (Ctrl+B)", [this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); }},
+        {"Bevel 3 seg", "Rounded 3-segment bevel", [this] { return M::bevel(*scene_, bevelOffset_, 3, true); }},
+        {"Bridge", "Bridge two border loops / face regions", [this] { return M::bridge(*scene_, bridgeDivisions_); }},
+        {"Multi-Cut", "Multi-Cut tool", [this] { toolActs_[5]->trigger(); return QString(); }},
+        {"Target Weld", "Drag a vertex onto another", [this] { toolActs_[6]->trigger(); return QString(); }},
+        {"Insert Loop", "Insert Edge Loop tool", [this] { toolActs_[4]->trigger(); return QString(); }},
+        {"|", "", nullptr},
+        {"Sym X", "Toggle object-X symmetry", [this] {
+            auto* c = findChild<QComboBox*>("symmetryCombo");
+            if (c) c->setCurrentIndex(scene_->symmetry == 0 ? 0 : 1);
+            return QString(scene_->symmetry == 0 ? "Symmetry: object X" : "Symmetry: off");
+        }},
+    });
+    shelf("Retopo", {
+        {"Make Live", "Make the selected (high-poly) mesh live", [&s] { return M::toggleLive(s); }},
+        {"Quad Draw", "Quad Draw tool", [this] { toolActs_[7]->trigger(); return QString(); }},
+        {"Conform", "Snap the selection to the live surface", [&s] { return M::conform(s); }},
+        {"Relax+Conform", "Smooth then conform", [&s] { return M::conform(s); }},
+    });
+    shelf("UV", {
+        {"Planar", "", [&s] { return M::projectUVs(s, M::Projection::PlanarBest); }},
+        {"Cylindrical", "", [&s] { return M::projectUVs(s, M::Projection::Cylindrical); }},
+        {"Spherical", "", [&s] { return M::projectUVs(s, M::Projection::Spherical); }},
+        {"Automatic", "", [&s] { return M::projectUVs(s, M::Projection::Automatic); }},
+        {"|", "", nullptr},
+        {"Cut", "Cut UV edges", [&s] { return M::cutUVs(s); }},
+        {"Sew", "Move and sew", [&s] { return M::sewUVs(s); }},
+        {"Unfold", "LSCM unfold", [&s] { return M::unfoldUVs(s); }},
+        {"Layout", "Pack shells", [&s] { return M::layoutUVs(s); }},
+        {"|", "", nullptr},
+        {"UV Editor", "Open the UV Editor", [this] { openUVEditor(); return QString(); }},
+        {"Checker", "Toggle the viewport UV checker (6)", [this] { checkerAct_->toggle(); return QString(); }},
+    });
     shelf("Subdiv", {
         {"Preview Off (1)", "", [&s] { return M::setSmoothDisplay(s, 0); }},
         {"Cage+Smooth (2)", "", [&s] { return M::setSmoothDisplay(s, 1); }},
@@ -456,8 +580,8 @@ void MainWindow::buildDocks()
     box->setObjectName("toolBox");
     box->setOrientation(Qt::Vertical);
     box->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    const char* short_[] = {"Select", "Move", "Rotate", "Scale", "Loop"};
-    for (int i = 0; i < 5; ++i) {
+    const char* short_[] = {"Select", "Move", "Rotate", "Scale", "Loop", "Cut", "Weld", "Quad"};
+    for (int i = 0; i < 8; ++i) {
         QToolButton* b = new QToolButton;
         b->setDefaultAction(toolActs_[i]);
         b->setText(short_[i]);
@@ -475,10 +599,21 @@ void MainWindow::buildDocks()
     cbDock->setWidget(new ChannelBox(scene_));
     cbDock->setMinimumWidth(250);
     addDockWidget(Qt::RightDockWidgetArea, cbDock);
+    uvDock_ = new QDockWidget("UV Editor", this);
+    uvDock_->setObjectName("uvEditor");
+    uvEditor_ = new UVEditor(scene_, [this](const QString& m) { report(m); });
+    uvDock_->setWidget(uvEditor_);
+    addDockWidget(Qt::RightDockWidgetArea, uvDock_);
+    uvDock_->setFloating(true); // its own window, like Maya's UV Editor (dock it by dragging)
+    uvDock_->resize(820, 680);
+    uvDock_->hide();
+    connect(uvEditor_->checkerAction(), &QAction::toggled, checkerAct_, &QAction::setChecked);
+    connect(checkerAct_, &QAction::toggled, uvEditor_->checkerAction(), &QAction::setChecked);
     for (QMenu* m : findChildren<QMenu*>("windowsMenu")) {
         m->addSeparator();
         m->addAction(outDock->toggleViewAction());
         m->addAction(cbDock->toggleViewAction());
+        m->addAction(uvDock_->toggleViewAction());
     }
 }
 
@@ -529,6 +664,9 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                      {"Mirror X", D::S, run([&s] { return M::mirror(s, 0); })},
                      {"Fill Hole", D::NE, run([&s] { return M::fillHole(s); })},
                      {"Insert Edge Loop", D::NW, run([this] { toolActs_[4]->trigger(); return QString(); })},
+                     {"Make Live", D::SE, run([&s] { return M::toggleLive(s); })},
+                     {"Quad Draw", D::SW, run([this] { toolActs_[7]->trigger(); return QString(); })},
+                     {"Automatic UVs", D::List, run([&s] { return M::projectUVs(s, M::Projection::Automatic); })},
                      {"Freeze Transformations", D::List, run([&s] { return M::freezeTransforms(s); })},
                      {"Center Pivot", D::List, run([&s] { return M::centerPivot(s); })},
                      {"Delete History", D::List, run([&s] { return M::deleteHistory(s); })},
@@ -541,9 +679,13 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                      {"Insert Edge Loop", D::S, run([this] { toolActs_[4]->trigger(); return QString(); })},
                      {"Collapse", D::E, run([&s] { return M::collapse(s); })},
                      {"Merge", D::NE, run([this] { return M::mergeVertices(*scene_, mergeThreshold_); })},
+                     {"Bevel", D::NW, run([this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); })},
+                     {"Bridge", D::SW, run([this] { return M::bridge(*scene_, bridgeDivisions_); })},
+                     {"Planar UVs", D::SE, run([&s] { return M::projectUVs(s, M::Projection::PlanarBest); })},
                      {"Reverse Normals", D::List, run([&s] { return M::reverseNormals(s); })},
                      {"Triangulate", D::List, run([&s] { return M::triangulate(s); })},
-                     {"Grow Selection", D::List, run([&s] { return M::growSelection(s); })}};
+                     {"Grow Selection", D::List, run([&s] { return M::growSelection(s); })},
+                     {"Multi-Cut", D::List, run([this] { toolActs_[5]->trigger(); return QString(); })}};
             break;
         case SelectMode::Edge:
             title = "Edge tools";
@@ -555,6 +697,11 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                      {"Uncrease", D::SE, run([&s] { return M::setCrease(s, 0.0f); })},
                      {"Select Loop", D::NW, run([&s] { return M::selectEdgeLoop(s); })},
                      {"Select Ring", D::SW, run([&s] { return M::selectEdgeRing(s); })},
+                     {"Bevel", D::List, run([this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); })},
+                     {"Bridge", D::List, run([this] { return M::bridge(*scene_, bridgeDivisions_); })},
+                     {"Multi-Cut", D::List, run([this] { toolActs_[5]->trigger(); return QString(); })},
+                     {"Cut UVs", D::List, run([&s] { return M::cutUVs(s); })},
+                     {"Sew UVs", D::List, run([&s] { return M::sewUVs(s); })},
                      {"Fill Hole", D::List, run([&s] { return M::fillHole(s); })},
                      {"Merge", D::List, run([this] { return M::mergeVertices(*scene_, mergeThreshold_); })}};
             break;
@@ -565,6 +712,8 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                      {"Merge to Center", D::E, run([&s] { return M::mergeToCenter(s); })},
                      {"Insert Edge Loop", D::S, run([this] { toolActs_[4]->trigger(); return QString(); })},
                      {"Soft Select", D::NE, run([&s] { s.softSelect = !s.softSelect; s.notifySelectionChanged(); return QString(s.softSelect ? "Soft Select on" : "Soft Select off"); })},
+                     {"Target Weld", D::NW, run([this] { toolActs_[6]->trigger(); return QString(); })},
+                     {"Bevel", D::SE, run([this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); })},
                      {"Grow Selection", D::List, run([&s] { return M::growSelection(s); })}};
             break;
         }
@@ -590,7 +739,10 @@ void MainWindow::updateHelpLine()
                                   "Move Tool: drag a handle; MMB-drag anywhere uses the last handle. Hold X to snap to grid.",
                                   "Rotate Tool: drag a ring; hold J to snap to 15°.",
                                   "Scale Tool: drag an axis or the centre for uniform scale.",
-                                  "Insert Edge Loop: hover an edge to preview, click (or drag to slide) to insert."};
+                                  "Insert Edge Loop: hover an edge to preview, click (or drag to slide) to insert.",
+                                  "Multi-Cut: click points on edges/vertices, Enter or RMB to cut. Ctrl+click inserts an edge loop.",
+                                  "Target Weld: drag from one vertex onto another to merge them.",
+                                  "Quad Draw: click to place dots on the live surface, Shift+click fills a quad, Shift+drag relaxes."};
     statusBar()->showMessage(tools[int(scene_->tool())]);
 }
 
@@ -674,6 +826,11 @@ void MainWindow::showHotkeys()
 <tr><td><b>Shift + RMB</b></td><td>Modeling tools marking menu</td></tr>
 <tr><td><b>Ctrl + RMB</b></td><td>Convert-selection marking menu</td></tr>
 <tr><td><b>Ctrl+E</b></td><td>Extrude</td></tr>
+<tr><td><b>Ctrl+B</b></td><td>Bevel (Edit Mesh &gt; Bevel Options for offset / segments)</td></tr>
+<tr><td><b>Multi-Cut</b></td><td>click edges/verts, Shift = 10% snap, Ctrl+click = loop, Enter/RMB = cut</td></tr>
+<tr><td><b>Quad Draw</b></td><td>click = dot, Shift+click = quad, Shift+drag = relax, Ctrl+click = delete / insert loop, Tab+drag = extend</td></tr>
+<tr><td><b>6</b></td><td>UV checker display; <b>Ctrl+Shift+U</b> UV Editor (W/E/R, F, A inside it)</td></tr>
+<tr><td><b>Ctrl+I</b></td><td>Import FBX / OBJ</td></tr>
 <tr><td><b>G</b></td><td>Repeat last command</td></tr>
 <tr><td><b>Ctrl+D</b></td><td>Duplicate</td></tr>
 <tr><td><b>Delete</b></td><td>Delete objects / faces / dissolve edges &amp; vertices</td></tr>
@@ -691,6 +848,45 @@ void MainWindow::showHotkeys()
     auto* l = new QVBoxLayout(d);
     l->addWidget(tb);
     d->show();
+}
+
+void MainWindow::bevelOptions()
+{
+    QDialog d(this);
+    d.setWindowTitle("Bevel Options");
+    auto* f = new QFormLayout(&d);
+    auto* off = new QDoubleSpinBox;
+    off->setDecimals(4);
+    off->setRange(0.0001, 1000);
+    off->setValue(bevelOffset_);
+    auto* seg = new QSpinBox;
+    seg->setRange(1, 32);
+    seg->setValue(bevelSegments_);
+    auto* round = new QCheckBox("Round profile");
+    round->setChecked(bevelRound_);
+    f->addRow("Offset (fraction-free, world units):", off);
+    f->addRow("Segments:", seg);
+    f->addRow(round);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    auto store = [&] { bevelOffset_ = float(off->value()); bevelSegments_ = seg->value(); bevelRound_ = round->isChecked(); };
+    connect(bb, &QDialogButtonBox::accepted, &d, [&] { store(); d.accept(); });
+    connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+    connect(bb->button(QDialogButtonBox::Apply), &QPushButton::clicked, &d, [&] {
+        store();
+        report(M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_));
+        d.accept();
+    });
+    d.exec();
+}
+
+void MainWindow::setChecker(bool on) { checkerAct_->setChecked(on); }
+
+void MainWindow::openUVEditor()
+{
+    uvDock_->show();
+    uvDock_->raise();
+    QTimer::singleShot(0, uvEditor_->canvas(), [c = uvEditor_->canvas()] { c->frame(false); });
 }
 
 void MainWindow::closeEvent(QCloseEvent* e)

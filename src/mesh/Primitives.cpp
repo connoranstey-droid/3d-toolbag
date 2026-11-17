@@ -37,14 +37,27 @@ void weld(Mesh& m, float eps)
 }
 
 // Adds a grid patch spanning origin + u*[0,1] + v*[0,1]; faces wind CCW around u x v.
-static void addGrid(Mesh& m, Vec3 origin, Vec3 u, Vec3 v, int su, int sv)
+// UVs cover the rect (uv0, uv0 + uvSize).
+static void addGrid(Mesh& m, Vec3 origin, Vec3 u, Vec3 v, int su, int sv, Vec2 uv0 = {0, 0}, Vec2 uvSize = {1, 1})
 {
     const uint32_t base = m.numVerts();
     for (int j = 0; j <= sv; ++j)
         for (int i = 0; i <= su; ++i) m.addVertex(origin + u * (float(i) / su) + v * (float(j) / sv));
     auto idx = [&](int i, int j) { return base + uint32_t(j * (su + 1) + i); };
+    auto uv = [&](int i, int j) { return Vec2{uv0.x + uvSize.x * float(i) / su, uv0.y + uvSize.y * float(j) / sv}; };
     for (int j = 0; j < sv; ++j)
-        for (int i = 0; i < su; ++i) m.addFace({idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)});
+        for (int i = 0; i < su; ++i) {
+            const uint32_t q[4] = {idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)};
+            const Vec2 t[4] = {uv(i, j), uv(i + 1, j), uv(i + 1, j + 1), uv(i, j + 1)};
+            m.addFaceWithUVs(q, t);
+        }
+}
+
+static void finish(Mesh& m)
+{
+    m.weldUVs(1e-5f);
+    m.buildTopology();
+    m.touchUVs();
 }
 
 Mesh cube(float w, float h, float d, int sx, int sy, int sz)
@@ -52,14 +65,16 @@ Mesh cube(float w, float h, float d, int sx, int sy, int sz)
     sx = std::max(1, sx); sy = std::max(1, sy); sz = std::max(1, sz);
     Mesh m;
     const float x = w / 2, y = h / 2, z = d / 2;
-    addGrid(m, {-x, -y, z}, {w, 0, 0}, {0, h, 0}, sx, sy);   // +Z
-    addGrid(m, {x, -y, -z}, {-w, 0, 0}, {0, h, 0}, sx, sy);  // -Z
-    addGrid(m, {x, -y, z}, {0, 0, -d}, {0, h, 0}, sz, sy);   // +X
-    addGrid(m, {-x, -y, -z}, {0, 0, d}, {0, h, 0}, sz, sy);  // -X
-    addGrid(m, {-x, y, z}, {w, 0, 0}, {0, 0, -d}, sx, sz);   // +Y
-    addGrid(m, {-x, -y, -z}, {w, 0, 0}, {0, 0, d}, sx, sz);  // -Y
+    // Maya-style cross layout: front/top/back/bottom stacked vertically, sides left and right.
+    const float a = 0.375f, b = 0.25f, q = 0.25f;
+    addGrid(m, {-x, -y, z}, {w, 0, 0}, {0, h, 0}, sx, sy, {a, 0.0f}, {b, q});        // +Z front
+    addGrid(m, {-x, y, z}, {w, 0, 0}, {0, 0, -d}, sx, sz, {a, 0.25f}, {b, q});       // +Y top
+    addGrid(m, {-x, y, -z}, {w, 0, 0}, {0, -h, 0}, sx, sy, {a, 0.5f}, {b, q});       // -Z back
+    addGrid(m, {-x, -y, -z}, {w, 0, 0}, {0, 0, d}, sx, sz, {a, 0.75f}, {b, q});      // -Y bottom
+    addGrid(m, {x, -y, z}, {0, 0, -d}, {0, h, 0}, sz, sy, {0.625f, 0.0f}, {b, q});   // +X right
+    addGrid(m, {-x, -y, -z}, {0, 0, d}, {0, h, 0}, sz, sy, {0.125f, 0.0f}, {b, q});  // -X left
     weld(m, 1e-5f * std::max({w, h, d}));
-    m.buildTopology();
+    finish(m);
     return m;
 }
 
@@ -68,7 +83,7 @@ Mesh plane(float w, float h, int sx, int sy)
     sx = std::max(1, sx); sy = std::max(1, sy);
     Mesh m;
     addGrid(m, {-w / 2, 0, h / 2}, {w, 0, 0}, {0, 0, -h}, sx, sy);
-    m.buildTopology();
+    finish(m);
     return m;
 }
 
@@ -86,13 +101,29 @@ Mesh sphere(float r, int sa, int sh)
     }
     const uint32_t bot = m.addVertex({0, -r, 0});
     auto ring = [&](int j, int i) { return 1 + uint32_t((j - 1) * sa + ((i % sa + sa) % sa)); };
-    for (int i = 0; i < sa; ++i) m.addFace({top, ring(1, i), ring(1, i + 1)});
+    auto uv = [&](float i, int j) { return Vec2{i / sa, 1.0f - float(j) / sh}; };
+    for (int i = 0; i < sa; ++i) {
+        const uint32_t f[3] = {top, ring(1, i), ring(1, i + 1)};
+        const Vec2 t[3] = {uv(i + 0.5f, 0), uv(float(i), 1), uv(float(i + 1), 1)};
+        m.addFaceWithUVs(f, t);
+    }
     for (int j = 1; j < sh - 1; ++j)
-        for (int i = 0; i < sa; ++i) m.addFace({ring(j, i), ring(j + 1, i), ring(j + 1, i + 1), ring(j, i + 1)});
-    for (int i = 0; i < sa; ++i) m.addFace({ring(sh - 1, i), bot, ring(sh - 1, i + 1)});
-    m.buildTopology();
+        for (int i = 0; i < sa; ++i) {
+            const uint32_t f[4] = {ring(j, i), ring(j + 1, i), ring(j + 1, i + 1), ring(j, i + 1)};
+            const Vec2 t[4] = {uv(float(i), j), uv(float(i), j + 1), uv(float(i + 1), j + 1), uv(float(i + 1), j)};
+            m.addFaceWithUVs(f, t);
+        }
+    for (int i = 0; i < sa; ++i) {
+        const uint32_t f[3] = {ring(sh - 1, i), bot, ring(sh - 1, i + 1)};
+        const Vec2 t[3] = {uv(float(i), sh - 1), uv(i + 0.5f, sh), uv(float(i + 1), sh - 1)};
+        m.addFaceWithUVs(f, t);
+    }
+    finish(m);
     return m;
 }
+
+// Circular cap uvs centred at c with radius rad.
+static Vec2 capUV(Vec2 c, float rad, float th, bool flip) { return {c.x + rad * std::cos(th) * (flip ? -1.f : 1.f), c.y + rad * std::sin(th)}; }
 
 Mesh cylinder(float r, float height, int sa, int sh, bool caps)
 {
@@ -106,16 +137,28 @@ Mesh cylinder(float r, float height, int sa, int sh, bool caps)
         }
     }
     auto idx = [&](int j, int i) { return uint32_t(j * sa + (i % sa)); };
+    auto uv = [&](int i, int j) { return Vec2{float(i) / sa, 0.5f + 0.5f * float(j) / sh}; };
     for (int j = 0; j < sh; ++j)
-        for (int i = 0; i < sa; ++i) m.addFace({idx(j, i), idx(j, i + 1), idx(j + 1, i + 1), idx(j + 1, i)});
+        for (int i = 0; i < sa; ++i) {
+            const uint32_t f[4] = {idx(j, i), idx(j, i + 1), idx(j + 1, i + 1), idx(j + 1, i)};
+            const Vec2 t[4] = {uv(i, j), uv(i + 1, j), uv(i + 1, j + 1), uv(i, j + 1)};
+            m.addFaceWithUVs(f, t);
+        }
     if (caps) {
         std::vector<uint32_t> topCap, botCap;
-        for (int i = 0; i < sa; ++i) topCap.push_back(idx(sh, i));
-        for (int i = sa - 1; i >= 0; --i) botCap.push_back(idx(0, i));
-        m.addFace(topCap);
-        m.addFace(botCap);
+        std::vector<Vec2> topUV, botUV;
+        for (int i = 0; i < sa; ++i) {
+            topCap.push_back(idx(sh, i));
+            topUV.push_back(capUV({0.75f, 0.25f}, 0.24f, 2 * kPi * i / sa, false));
+        }
+        for (int i = sa - 1; i >= 0; --i) {
+            botCap.push_back(idx(0, i));
+            botUV.push_back(capUV({0.25f, 0.25f}, 0.24f, 2 * kPi * i / sa, true));
+        }
+        m.addFaceWithUVs(topCap, topUV);
+        m.addFaceWithUVs(botCap, botUV);
     }
-    m.buildTopology();
+    finish(m);
     return m;
 }
 
@@ -133,13 +176,26 @@ Mesh cone(float r, float height, int sa, int sh)
     }
     const uint32_t apex = m.addVertex({0, height / 2, 0});
     auto idx = [&](int j, int i) { return uint32_t(j * sa + (i % sa)); };
+    auto uv = [&](float i, int j) { return Vec2{i / sa, 0.5f + 0.5f * float(j) / sh}; };
     for (int j = 0; j < sh - 1; ++j)
-        for (int i = 0; i < sa; ++i) m.addFace({idx(j, i), idx(j, i + 1), idx(j + 1, i + 1), idx(j + 1, i)});
-    for (int i = 0; i < sa; ++i) m.addFace({idx(sh - 1, i), idx(sh - 1, i + 1), apex});
+        for (int i = 0; i < sa; ++i) {
+            const uint32_t f[4] = {idx(j, i), idx(j, i + 1), idx(j + 1, i + 1), idx(j + 1, i)};
+            const Vec2 t[4] = {uv(float(i), j), uv(float(i + 1), j), uv(float(i + 1), j + 1), uv(float(i), j + 1)};
+            m.addFaceWithUVs(f, t);
+        }
+    for (int i = 0; i < sa; ++i) {
+        const uint32_t f[3] = {idx(sh - 1, i), idx(sh - 1, i + 1), apex};
+        const Vec2 t[3] = {uv(float(i), sh - 1), uv(float(i + 1), sh - 1), uv(i + 0.5f, sh)};
+        m.addFaceWithUVs(f, t);
+    }
     std::vector<uint32_t> cap;
-    for (int i = sa - 1; i >= 0; --i) cap.push_back(idx(0, i));
-    m.addFace(cap);
-    m.buildTopology();
+    std::vector<Vec2> capT;
+    for (int i = sa - 1; i >= 0; --i) {
+        cap.push_back(idx(0, i));
+        capT.push_back(capUV({0.25f, 0.25f}, 0.24f, 2 * kPi * i / sa, true));
+    }
+    m.addFaceWithUVs(cap, capT);
+    finish(m);
     return m;
 }
 
@@ -156,9 +212,14 @@ Mesh torus(float R, float r, int sa, int sh)
         }
     }
     auto idx = [&](int i, int j) { return uint32_t((i % sa) * sh + (j % sh)); };
+    auto uv = [&](int i, int j) { return Vec2{float(i) / sa, float(j) / sh}; };
     for (int i = 0; i < sa; ++i)
-        for (int j = 0; j < sh; ++j) m.addFace({idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)});
-    m.buildTopology();
+        for (int j = 0; j < sh; ++j) {
+            const uint32_t f[4] = {idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)};
+            const Vec2 t[4] = {uv(i, j), uv(i + 1, j), uv(i + 1, j + 1), uv(i, j + 1)};
+            m.addFaceWithUVs(f, t);
+        }
+    finish(m);
     return m;
 }
 

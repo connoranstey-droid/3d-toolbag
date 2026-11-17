@@ -63,4 +63,22 @@ private:
     bool first_ = true;
 };
 
+// In-place uv value edits (UV editor transforms).
+class UVMoveCommand : public QUndoCommand {
+public:
+    struct Entry {
+        std::shared_ptr<Mesh> mesh;
+        std::vector<uint32_t> indices;
+        std::vector<Vec2> before, after;
+    };
+    UVMoveCommand(Scene* scene, std::vector<Entry> entries, const QString& text);
+    void undo() override;
+    void redo() override;
+
+private:
+    void apply(bool after);
+    Scene* scene_;
+    std::vector<Entry> entries_;
+};
+
 } // namespace facet

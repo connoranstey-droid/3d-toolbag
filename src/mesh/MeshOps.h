@@ -42,6 +42,32 @@ void triangulate(Mesh& m, const IndexList& faces = {});
 void mirror(Mesh& m, int axis, float mergeThreshold = 1e-3f);
 std::vector<Mesh> separate(const Mesh& m);
 
+// Merges vertex `src` into `dst` (dst keeps its position).
+void mergeInto(Mesh& m, uint32_t src, uint32_t dst);
+
+struct BevelOptions {
+    float offset = 0.1f;  // world-ish distance from the original edge
+    int segments = 1;
+    bool round = true;    // circular-ish profile when segments > 1
+};
+// Bevels/chamfers manifold edges. Returns the new faces (edge strips and corner patches).
+IndexList bevelEdges(Mesh& m, const IndexList& edges, const BevelOptions& opt);
+
+// Bridges exactly two border edge chains (open or closed, equal length). Returns new faces.
+IndexList bridgeEdges(Mesh& m, const IndexList& borderEdges, int divisions = 0);
+// Deletes two face regions and bridges their boundary loops.
+IndexList bridgeFaces(Mesh& m, const IndexList& faces, int divisions = 0);
+
+// Splits edge (a,b) at t (from a). Returns the new vertex (kInvalid if no such edge).
+uint32_t splitEdge(Mesh& m, uint32_t a, uint32_t b, float t);
+// Splits a face containing both (non-adjacent) vertices. Returns false if none.
+bool splitFace(Mesh& m, uint32_t va, uint32_t vb);
+
+// Multi-Cut: a polyline of points on edges (b != kInvalid, t from a) or on vertices (b == kInvalid).
+struct CutPoint { uint32_t a = kInvalid, b = kInvalid; float t = 0.0f; };
+// Cuts consecutive points through shared faces. Returns the new edges.
+IndexList multiCut(Mesh& m, const std::vector<CutPoint>& points);
+
 // ---- component helpers ----
 IndexList edgeLoop(const Mesh& m, uint32_t edge);
 IndexList edgeRing(const Mesh& m, uint32_t edge);

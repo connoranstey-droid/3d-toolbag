@@ -2,6 +2,7 @@
 #include "mesh/Mesh.h"
 #include "mesh/MeshOps.h"
 #include "mesh/Subdivision.h"
+#include "mesh/BVH.h"
 
 #include <QObject>
 #include <QString>
@@ -16,7 +17,7 @@ namespace facet {
 
 enum class SelectMode { Object, Vertex, Edge, Face };
 enum class SelectOp { Replace, Toggle, Add, Remove };
-enum class Tool { Select, Move, Rotate, Scale, InsertEdgeLoop };
+enum class Tool { Select, Move, Rotate, Scale, InsertEdgeLoop, MultiCut, TargetWeld, QuadDraw };
 enum class AxisOrient { World, Object, Normal };
 
 // Editable construction history for primitives (Channel Box "INPUTS").
@@ -42,6 +43,7 @@ struct ObjectState {
 
 struct ComponentSelection {
     std::vector<uint32_t> verts, edges, faces;
+    std::vector<uint32_t> uvs; // UV editor selection (uv indices)
     bool empty() const { return verts.empty() && edges.empty() && faces.empty(); }
 };
 
@@ -104,6 +106,22 @@ public:
     // Per-vertex weights (1 = selected) for an object; empty when nothing is affected.
     std::vector<float> softWeights(SceneObject* obj) const;
 
+    // Symmetry (object space): -1 off, 0 = X, 1 = Y, 2 = Z. Component edits and selection are mirrored.
+    int symmetry = -1;
+    // For each vertex its mirror partner across the symmetry plane (kInvalid if none).
+    std::vector<uint32_t> mirrorMap(SceneObject* obj, int axis) const;
+    // Adds the mirror counterparts of `items` (in the current mode).
+    std::vector<uint32_t> withMirrored(SceneObject* obj, const std::vector<uint32_t>& items) const;
+
+    // Retopology: the "live" surface everything snaps to.
+    uint32_t liveId = 0;
+    SceneObject* liveObject() const { return liveId ? find(liveId) : nullptr; }
+    // BVH of the live object's cage (local space), rebuilt lazily.
+    const TriBVH* liveBVH();
+    // Ray (world) onto the live surface. Returns false if it misses.
+    bool rayToLive(const Ray& worldRay, Vec3& hitWorld, Vec3* normalWorld = nullptr);
+    bool closestOnLive(const Vec3& world, Vec3& outWorld, float maxDist = 1e30f);
+
     // ---- tool state shared by UI and viewport ----
     Tool tool() const { return tool_; }
     void setTool(Tool t);
@@ -143,6 +161,8 @@ private:
     std::vector<uint32_t> selection_;
     uint32_t nextId_ = 1;
     uint64_t selVersion_ = 1;
+    TriBVH liveBvh_;
+    uint32_t liveBvhFor_ = 0;
 };
 
 } // namespace facet

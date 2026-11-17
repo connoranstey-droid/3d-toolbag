@@ -2,6 +2,8 @@
 #include "scene/Modeling.h"
 #include "ui/MainWindow.h"
 #include "viewport/Viewport.h"
+#include "ui/UVEditor.h"
+#include "mesh/UVOps.h"
 
 #include <QApplication>
 #include <QMouseEvent>
@@ -218,9 +220,178 @@ int main(int argc, char** argv)
     QTest::keyPress(vp, Qt::Key_Space);
     QTest::keyRelease(vp, Qt::Key_Space);
     CHECK(!vp->quadView());
+    vp->setSingleView(ViewKind::Persp); // the toggle maximizes whichever panel the (headless) cursor is over
     std::printf("%s space quad toggle\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
 
+    // ---- symmetry: moving a vertex drags its mirror partner ----
+    s.clear();
+    M::createPrimitive(s, "polyCube");
+    SceneObject* sc = s.lead();
+    vp->frameSelected();
+    vp->repaint();
+    s.symmetry = 0;
+    key(vp, Qt::Key_F9);
+    click(vp, vp->worldToWidget({0.5f, 0.5f, 0.5f}));
+    CHECK(sc->sel.verts.size() == 2); // symmetric selection picks the partner too
+    key(vp, Qt::Key_W);
+    s.moveOrient = AxisOrient::World;
+    vp->repaint();
+    {
+        uint32_t pv = kInvalid, nv = kInvalid;
+        for (uint32_t v = 0; v < sc->mesh().numVerts(); ++v) {
+            Vec3 q = sc->mesh().positions[v];
+            if (std::abs(q.y - 0.5f) < 1e-4f && std::abs(q.z - 0.5f) < 1e-4f) (q.x > 0 ? pv : nv) = v;
+        }
+        // Keep only the +X vertex selected; symmetry still drags the partner.
+        s.symmetry = -1;
+        s.setComponents(sc, SelectMode::Vertex, {pv});
+        s.symmetry = 0;
+        vp->repaint();
+        QPoint o2 = vp->worldToWidget({0.5f, 0.5f, 0.5f});
+        QPoint yT = vp->worldToWidget({0.5f, 0.8f, 0.5f});
+        QPointF dy = QPointF(yT - o2);
+        dy /= std::hypot(dy.x(), dy.y());
+        QPoint h2 = o2 + (dy * 55).toPoint();
+        drag(vp, h2, h2 + (dy * 50).toPoint());
+        Vec3 a = sc->mesh().positions[pv], b = sc->mesh().positions[nv];
+        std::printf("  sym: +x vertex y=%.3f, mirror y=%.3f x=%.3f\n", a.y, b.y, b.x);
+        CHECK(a.y > 0.55f && std::abs(a.y - b.y) < 1e-4f && std::abs(b.x + 0.5f) < 1e-4f);
+    }
+    s.symmetry = -1;
+    std::printf("%s symmetry\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- bevel hotkey ----
+    key(vp, Qt::Key_Z, Qt::ControlModifier);
+    key(vp, Qt::Key_F10);
+    vp->repaint();
+    s.clearComponents();
+    click(vp, vp->worldToWidget({0.0f, 0.5f, 0.5f}));
+    CHECK(sc->sel.edges.size() == 1);
+    key(vp, Qt::Key_B, Qt::ControlModifier);
+    CHECK(sc->mesh().numFaces() == 7);
+    std::printf("%s bevel (Ctrl+B)\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- Multi-Cut across a single-quad plane ----
+    s.clear();
+    M::createPrimitive(s, "polyPlane");
+    SceneObject* pl = s.lead();
+    pl->st.history->set("subdivisionsWidth", 1);
+    pl->st.history->set("subdivisionsHeight", 1);
+    pl->st.mesh = std::make_shared<Mesh>(buildPrimitive(*pl->st.history));
+    vp->frameSelected();
+    s.setTool(Tool::MultiCut);
+    vp->repaint();
+    QPoint m1 = vp->worldToWidget({0.0f, 0.0f, 0.49f}), m2 = vp->worldToWidget({0.0f, 0.0f, -0.49f});
+    moveTo(vp, m1);
+    click(vp, m1);
+    moveTo(vp, m2);
+    click(vp, m2);
+    key(vp, Qt::Key_Return);
+    CHECK(pl->mesh().numFaces() == 2 && pl->mesh().numVerts() == 6);
+    std::printf("%s multi-cut (faces=%u)\n", (g_fail == g_mark ? "PASS" : "FAIL"), pl->mesh().numFaces()); g_mark = g_fail;
+
+    // ---- Target Weld: drag a corner onto the cut vertex ----
+    s.setMode(SelectMode::Vertex);
+    s.setTool(Tool::TargetWeld);
+    vp->repaint();
+    {
+        QPoint from = vp->worldToWidget({-0.5f, 0.0f, 0.5f}), to = vp->worldToWidget({0.0f, 0.0f, 0.5f});
+        drag(vp, from, to);
+    }
+    CHECK(pl->mesh().numVerts() == 5);
+    std::printf("%s target weld (verts=%u)\n", (g_fail == g_mark ? "PASS" : "FAIL"), pl->mesh().numVerts()); g_mark = g_fail;
+
+    // ---- Quad Draw on a live sphere ----
+    s.clear();
+    s.setTool(Tool::Select);
+    s.setMode(SelectMode::Object);
+    M::createPrimitive(s, "polySphere");
+    SceneObject* live = s.lead();
+    vp->frameSelected();
+    M::toggleLive(s);
+    CHECK(s.liveId == live->id);
+    s.setTool(Tool::QuadDraw);
+    vp->repaint();
+    {
+        const Camera& cam = vp->activeCamera();
+        Vec3 n = normalize(cam.eye() - Vec3{0, 0, 0});
+        Vec3 t1 = normalize(cross({0, 1, 0}, n)), t2 = cross(n, t1);
+        Vec3 corners[4] = {normalize(n + t1 * 0.35f + t2 * 0.35f), normalize(n - t1 * 0.35f + t2 * 0.35f),
+                           normalize(n - t1 * 0.35f - t2 * 0.35f), normalize(n + t1 * 0.35f - t2 * 0.35f)};
+        for (const Vec3& c : corners) { QPoint q = vp->worldToWidget(c); moveTo(vp, q); click(vp, q); }
+        SceneObject* topo = s.lead();
+        CHECK(topo && topo->id != live->id && topo->mesh().numVerts() == 4);
+        QPoint mid = vp->worldToWidget(n);
+        moveTo(vp, mid, Qt::NoButton, Qt::ShiftModifier);
+        click(vp, mid, Qt::ShiftModifier);
+        if (topo) {
+            CHECK(topo->mesh().numFaces() == 1);
+            float maxErr = 0;
+            for (const Vec3& q : topo->mesh().positions) maxErr = std::max(maxErr, std::abs(length(q) - 1.0f));
+            std::printf("  retopo verts on surface, max error %.4f\n", maxErr);
+            CHECK(maxErr < 0.02f);
+            // Face should point outward (towards the camera).
+            if (topo->mesh().numFaces()) CHECK(dot(topo->mesh().faceNormal(0), n) > 0.5f);
+            // Shift+drag relaxes without breaking anything; undo removes the face.
+            key(vp, Qt::Key_Z, Qt::ControlModifier);
+            CHECK(topo->mesh().numFaces() == 0);
+        }
+    }
+    std::printf("%s quad draw\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- UV editor: automatic projection, marquee select, MMB move, undo ----
+    s.clear();
+    s.setTool(Tool::Select);
+    M::createPrimitive(s, "polyCube");
+    SceneObject* uc = s.lead();
+    M::projectUVs(s, M::Projection::Automatic);
+    CHECK(uc->mesh().hasUVs());
+    key(vp, Qt::Key_U, Qt::ControlModifier | Qt::ShiftModifier);
+    UVCanvas* canvas = w.findChild<UVCanvas*>();
+    CHECK(canvas && canvas->isVisible());
+    if (canvas) {
+        QApplication::processEvents();
+        canvas->frame(false);
+        drag(canvas, QPoint(2, 2), QPoint(canvas->width() - 2, canvas->height() - 2));
+        CHECK(uc->sel.uvs.size() == uc->mesh().uvs.size());
+        Vec2 before = uc->mesh().uvs[0];
+        drag(canvas, QPoint(50, 50), QPoint(90, 50), Qt::MiddleButton);
+        Vec2 after = uc->mesh().uvs[0];
+        CHECK(after.x > before.x + 1e-3f && std::abs(after.y - before.y) < 1e-5f);
+        key(vp, Qt::Key_Z, Qt::ControlModifier);
+        CHECK(std::abs(uc->mesh().uvs[0].x - before.x) < 1e-6f);
+    }
+    std::printf("%s uv editor\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- checker display renders ----
+    key(vp, Qt::Key_6);
+    CHECK(vp->options.textured);
+    vp->repaint();
+    key(vp, Qt::Key_5);
+    CHECK(!vp->options.textured);
+
+    // ---- FBX export / import through the app ----
+    {
+        QTemporaryDir td;
+        QString fp = td.filePath("scene.fbx");
+        M::createPrimitive(s, "polyTorus");
+        s.lead()->st.translate = {2, 0, 0};
+        size_t count = s.objects.size();
+        QString msg = M::exportFbx(s, fp, false);
+        s.clear();
+        msg = M::importFbx(s, fp);
+        CHECK(s.objects.size() == count);
+        bool torusOk = false;
+        for (auto& o : s.objects) torusOk |= o->st.name == "pTorus1" && std::abs(o->st.translate.x - 2) < 1e-5f && o->mesh().hasUVs();
+        CHECK(torusOk);
+    }
+    std::printf("%s fbx via app\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
     // ---- save / load roundtrip ----
+    s.clear();
+    M::createPrimitive(s, "polyCube");
+    M::createPrimitive(s, "polySphere");
+    cube = s.objects[0].get();
     QTemporaryDir tmp;
     QString path = tmp.filePath("t.facet");
     uint32_t faces = cube->mesh().numFaces();

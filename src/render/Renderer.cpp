@@ -12,12 +12,15 @@ namespace {
 const char* kMeshVS = R"(#version 410 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNrm;
+layout(location = 2) in vec2 aUV;
 uniform mat4 uMVP;
 uniform mat4 uModelView;
 uniform mat3 uNormalMat;
 out vec3 vN;
 out vec3 vViewPos;
+out vec2 vUV;
 void main() {
+    vUV = aUV;
     vec4 vp = uModelView * vec4(aPos, 1.0);
     vViewPos = vp.xyz;
     vN = uNormalMat * aNrm;
@@ -29,11 +32,21 @@ void main() {
 const char* kMeshFS = R"(#version 410 core
 in vec3 vN;
 in vec3 vViewPos;
+in vec2 vUV;
 uniform vec3 uColor;
 uniform float uAlpha;
 uniform int uFlat;
+uniform int uChecker;
 out vec4 frag;
 void main() {
+    vec3 base = uColor;
+    if (uChecker == 1) {
+        vec2 c = floor(vUV * 8.0);
+        float k = mod(c.x + c.y, 2.0);
+        base = mix(vec3(0.22, 0.22, 0.24), vec3(0.86, 0.86, 0.86), k);
+        // Tint by quadrant so flipped / rotated shells are easy to spot.
+        base *= vec3(0.8 + 0.2 * fract(vUV.x), 0.8 + 0.2 * fract(vUV.y), 0.92);
+    }
     vec3 n = (uFlat == 1) ? normalize(cross(dFdx(vViewPos), dFdy(vViewPos))) : normalize(vN);
     vec3 v = normalize(-vViewPos);
     if (dot(n, v) < 0.0) n = -n;
@@ -43,7 +56,7 @@ void main() {
     float dk = max(dot(n, key), 0.0);
     float df = max(dot(n, fill), 0.0);
     float hemi = 0.5 + 0.5 * n.y;
-    vec3 col = uColor * (0.10 + 0.22 * hemi + 0.72 * dk + 0.22 * df);
+    vec3 col = base * (0.10 + 0.22 * hemi + 0.72 * dk + 0.22 * df);
     vec3 h = normalize(key + v);
     col += vec3(0.22) * pow(max(dot(n, h), 0.0), 40.0);
     col += vec3(0.10) * pow(1.0 - max(dot(n, v), 0.0), 3.0) * (0.5 + 0.5 * max(dot(n, rimL), 0.0));
@@ -175,14 +188,17 @@ bool Renderer::initialize()
     return true;
 }
 
+void Renderer::deleteGpu(QOpenGLFunctions_4_1_Core* gl, GpuMesh& g)
+{
+    GLuint vaos[] = {g.vao, g.dWireVao, g.cVao, g.selEdgeVao, g.selTriVao, g.texVao};
+    GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris, g.texPos, g.texNrm, g.texUV, g.texIdx};
+    gl->glDeleteVertexArrays(6, vaos);
+    gl->glDeleteBuffers(13, bufs);
+}
+
 void Renderer::cleanup()
 {
-    for (auto& [id, g] : meshes_) {
-        GLuint vaos[] = {g.vao, g.dWireVao, g.cVao, g.selEdgeVao, g.selTriVao};
-        GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris};
-        glDeleteVertexArrays(5, vaos);
-        glDeleteBuffers(9, bufs);
-    }
+    for (auto& [id, g] : meshes_) deleteGpu(this, g);
     meshes_.clear();
     glDeleteProgram(meshProg_);
     glDeleteProgram(lineProg_);
@@ -203,11 +219,7 @@ void Renderer::purge(const Scene& scene)
 {
     for (auto it = meshes_.begin(); it != meshes_.end();) {
         if (!scene.find(it->first)) {
-            GpuMesh& g = it->second;
-            GLuint vaos[] = {g.vao, g.dWireVao, g.cVao, g.selEdgeVao, g.selTriVao};
-            GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris};
-            glDeleteVertexArrays(5, vaos);
-            glDeleteBuffers(9, bufs);
+            deleteGpu(this, it->second);
             it = meshes_.erase(it);
         } else {
             ++it;
@@ -225,8 +237,18 @@ void Renderer::syncObject(Scene& scene, SceneObject& obj)
         glGenVertexArrays(1, &g.cVao);
         glGenVertexArrays(1, &g.selEdgeVao);
         glGenVertexArrays(1, &g.selTriVao);
-        GLuint* bufs[] = {&g.pos, &g.nrm, &g.tri, &g.dWire, &g.cPos, &g.cWeight, &g.cEdges, &g.selEdges, &g.selTris};
+        GLuint* bufs[] = {&g.pos, &g.nrm, &g.tri, &g.dWire, &g.cPos, &g.cWeight, &g.cEdges, &g.selEdges, &g.selTris,
+                          &g.texPos, &g.texNrm, &g.texUV, &g.texIdx};
         for (GLuint* b : bufs) glGenBuffers(1, b);
+        glGenVertexArrays(1, &g.texVao);
+        glBindVertexArray(g.texVao);
+        GLuint texBufs[3] = {g.texPos, g.texNrm, g.texUV};
+        for (int a = 0; a < 3; ++a) {
+            glBindBuffer(GL_ARRAY_BUFFER, texBufs[a]);
+            glEnableVertexAttribArray(GLuint(a));
+            glVertexAttribPointer(GLuint(a), a == 2 ? 2 : 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+        }
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.texIdx);
 
         glBindVertexArray(g.vao);
         glBindBuffer(GL_ARRAY_BUFFER, g.pos);
@@ -290,7 +312,7 @@ void Renderer::uploadDisplay(SceneObject& obj, GpuMesh& g)
         g.selKey = 0;
     }
     if (g.dPos != d.positionId) {
-        std::vector<Vec3> n;
+        std::vector<Vec3>& n = g.normals;
         d.computeVertexNormals(n);
         glBindBuffer(GL_ARRAY_BUFFER, g.pos);
         glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(d.positions.size() * sizeof(Vec3)), d.positions.data(), GL_DYNAMIC_DRAW);
@@ -298,6 +320,51 @@ void Renderer::uploadDisplay(SceneObject& obj, GpuMesh& g)
         glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(n.size() * sizeof(Vec3)), n.data(), GL_DYNAMIC_DRAW);
         g.dPos = d.positionId;
     }
+}
+
+bool Renderer::uploadTextured(SceneObject& obj, GpuMesh& g)
+{
+    const Mesh& d = obj.displayMesh();
+    if (!d.hasUVs()) return false;
+    if (g.texTopo != d.topologyId || g.texUvId != d.uvId) {
+        // Split vertices where corners use different uvs.
+        std::unordered_map<uint64_t, uint32_t> split;
+        split.reserve(d.numHalfEdges());
+        g.texSrc.clear();
+        std::vector<Vec2> uvs;
+        std::vector<uint32_t> cornerIdx(d.numHalfEdges());
+        for (uint32_t h = 0; h < d.numHalfEdges(); ++h) {
+            uint64_t key = (uint64_t(d.faceVerts[h]) << 32) | d.faceUVs[h];
+            auto [it, ins] = split.emplace(key, uint32_t(g.texSrc.size()));
+            if (ins) { g.texSrc.push_back(d.faceVerts[h]); uvs.push_back(d.cornerUV(h)); }
+            cornerIdx[h] = it->second;
+        }
+        std::vector<uint32_t> idx;
+        idx.reserve(d.triangleCount() * 3);
+        for (uint32_t f = 0; f < d.numFaces(); ++f)
+            for (uint32_t i = 1; i + 1 < d.faceSize(f); ++i) {
+                uint32_t b = d.faceStart[f];
+                idx.insert(idx.end(), {cornerIdx[b], cornerIdx[b + i], cornerIdx[b + i + 1]});
+            }
+        glBindBuffer(GL_ARRAY_BUFFER, g.texUV);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(uvs.size() * sizeof(Vec2)), uvs.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, g.texIdx);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(idx.size() * 4), idx.data(), GL_STATIC_DRAW);
+        g.texIndexCount = GLsizei(idx.size());
+        g.texTopo = d.topologyId;
+        g.texUvId = d.uvId;
+        g.texPosId = 0;
+    }
+    if (g.texPosId != d.positionId && g.normals.size() == d.numVerts()) {
+        std::vector<Vec3> p(g.texSrc.size()), n(g.texSrc.size());
+        for (size_t i = 0; i < g.texSrc.size(); ++i) { p[i] = d.positions[g.texSrc[i]]; n[i] = g.normals[g.texSrc[i]]; }
+        glBindBuffer(GL_ARRAY_BUFFER, g.texPos);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(p.size() * sizeof(Vec3)), p.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, g.texNrm);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(n.size() * sizeof(Vec3)), n.data(), GL_DYNAMIC_DRAW);
+        g.texPosId = d.positionId;
+    }
+    return true;
 }
 
 void Renderer::uploadCage(Scene& scene, SceneObject& obj, GpuMesh& g, bool smooth)
@@ -459,7 +526,8 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
         glUseProgram(meshProg_);
         GLint uMVP = glGetUniformLocation(meshProg_, "uMVP"), uMV = glGetUniformLocation(meshProg_, "uModelView"),
               uNM = glGetUniformLocation(meshProg_, "uNormalMat"), uColor = glGetUniformLocation(meshProg_, "uColor"),
-              uAlpha = glGetUniformLocation(meshProg_, "uAlpha"), uFlat = glGetUniformLocation(meshProg_, "uFlat");
+              uAlpha = glGetUniformLocation(meshProg_, "uAlpha"), uFlat = glGetUniformLocation(meshProg_, "uFlat"),
+              uChecker = glGetUniformLocation(meshProg_, "uChecker");
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(1.0f, 1.0f);
         if (opt.xray) {
@@ -477,10 +545,25 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
             glUniformMatrix4fv(uMVP, 1, GL_FALSE, mvp.data());
             glUniformMatrix4fv(uMV, 1, GL_FALSE, mv.data());
             glUniformMatrix3fv(uNM, 1, GL_FALSE, nm);
-            glUniform3f(uColor, 0.58f, 0.59f, 0.60f);
-            glBindVertexArray(g->vao);
-            glDrawElements(GL_TRIANGLES, g->triIndexCount, GL_UNSIGNED_INT, nullptr);
+            const bool live = o->id == scene.liveId;
+            if (live) {
+                glUniform3f(uColor, 0.42f, 0.62f, 0.44f);
+                glPolygonOffset(4.0f, 24.0f); // keep the live surface behind retopology drawn onto it
+            } else {
+                glUniform3f(uColor, 0.58f, 0.59f, 0.60f);
+                glPolygonOffset(1.0f, 1.0f);
+            }
+            if (opt.textured && !live && uploadTextured(*o, *g)) {
+                glUniform1i(uChecker, 1);
+                glBindVertexArray(g->texVao);
+                glDrawElements(GL_TRIANGLES, g->texIndexCount, GL_UNSIGNED_INT, nullptr);
+                glUniform1i(uChecker, 0);
+            } else {
+                glBindVertexArray(g->vao);
+                glDrawElements(GL_TRIANGLES, g->triIndexCount, GL_UNSIGNED_INT, nullptr);
+            }
         }
+        glPolygonOffset(1.0f, 1.0f);
         glDisable(GL_POLYGON_OFFSET_FILL);
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);

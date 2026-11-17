@@ -32,6 +32,11 @@ public:
     std::vector<uint32_t> faceStart{0};
     std::vector<uint32_t> faceVerts;
 
+    // Face-varying UVs: faceUVs[corner] indexes uvs. Corners that share a vertex *and* a uv index
+    // are connected in UV space; different indices at one vertex form a UV seam.
+    std::vector<Vec2> uvs;
+    std::vector<uint32_t> faceUVs;
+
     // ---- derived topology (buildTopology) ----
     std::vector<uint32_t> heFace;
     std::vector<uint32_t> heTwin;   // kInvalid on borders
@@ -43,6 +48,21 @@ public:
 
     uint64_t topologyId = 0;
     uint64_t positionId = 0;
+    uint64_t uvId = 0;
+
+    bool hasUVs() const { return !uvs.empty() && faceUVs.size() == faceVerts.size() && !faceVerts.empty(); }
+    Vec2 cornerUV(uint32_t h) const { return uvs[faceUVs[h]]; }
+    void touchUVs() { uvId = nextVersionId(); }
+    // Adds one fresh uv entry per corner (helper for ops that create faces).
+    uint32_t addFaceWithUVs(std::span<const uint32_t> verts, std::span<const Vec2> uv);
+    // Merges uv indices of corners that share a vertex and (nearly) the same uv value.
+    void weldUVs(float eps = 1e-6f);
+    // Drops uv entries no corner uses.
+    void compactUVs();
+    // Creates an all-zero UV set (one uv per vertex) if the mesh has none.
+    void ensureUVs();
+    // UV seams: true if the edge's two sides use different uv indices at either end (or it is a border).
+    bool isUVBorderEdge(uint32_t e) const;
 
     uint32_t numVerts() const { return static_cast<uint32_t>(positions.size()); }
     uint32_t numFaces() const { return static_cast<uint32_t>(faceStart.size() - 1); }
