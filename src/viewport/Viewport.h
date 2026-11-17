@@ -1,0 +1,161 @@
+#pragma once
+#include "render/Renderer.h"
+#include "scene/Scene.h"
+#include "viewport/Camera.h"
+#include "viewport/Gizmo.h"
+
+#include <QElapsedTimer>
+#include <QOpenGLWidget>
+#include <QTimer>
+
+#include <array>
+
+namespace facet {
+
+class Viewport : public QOpenGLWidget {
+    Q_OBJECT
+public:
+    explicit Viewport(Scene* scene, QWidget* parent = nullptr);
+    ~Viewport() override;
+
+    DrawOptions options;
+    bool showHud = true;
+
+    bool quadView() const { return quad_; }
+    void setQuadView(bool on);
+    void toggleQuadView();
+    void setSingleView(ViewKind k);
+    void frameSelected(bool allViews = false);
+    void frameAll(bool allViews = false);
+    void cycleBackground();
+    Camera& activeCamera() { return cams_[size_t(active_)]; }
+    // Widget coordinates of a world point in the active view (used by tools and tests).
+    QPoint worldToWidget(const Vec3& w) const
+    {
+        Vec3 p = project(active_, w);
+        return QPoint(int(std::lround(p.x)), int(std::lround(p.y)));
+    }
+
+signals:
+    // kind: 0 = RMB (component/object), 1 = Shift+RMB (tools), 2 = Ctrl+RMB (convert selection)
+    void markingMenuRequested(int kind, QPoint globalPos, uint32_t objectUnderCursor);
+    void markingMenuTrack(QPoint globalPos);
+    void markingMenuRelease(QPoint globalPos);
+    void hotboxRequested(QPoint globalPos);
+    void hotboxDismissed();
+    void message(const QString& text);
+
+protected:
+    void initializeGL() override;
+    void resizeGL(int w, int h) override;
+    void paintGL() override;
+    void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void mouseReleaseEvent(QMouseEvent* e) override;
+    void mouseDoubleClickEvent(QMouseEvent* e) override;
+    void wheelEvent(QWheelEvent* e) override;
+    void keyPressEvent(QKeyEvent* e) override;
+    void keyReleaseEvent(QKeyEvent* e) override;
+    void enterEvent(QEnterEvent* e) override;
+    void leaveEvent(QEvent* e) override;
+    void focusOutEvent(QFocusEvent* e) override;
+
+private:
+    struct Hit {
+        SceneObject* obj = nullptr;
+        uint32_t cageFace = kInvalid;
+    };
+    struct CompEntry {
+        SceneObject* obj;
+        std::shared_ptr<Mesh> mesh;
+        std::vector<uint32_t> idx;
+        std::vector<float> w;
+        std::vector<Vec3> start;
+        Mat4 world, inv;
+    };
+    struct Manip {
+        Tool tool = Tool::Select;
+        Handle handle = Handle::None;
+        GizmoFrame frame;
+        Vec3 startHit, prevVec;
+        float startParam = 0, angle = 0;
+        QPoint startPos;
+        bool moved = false;
+        std::vector<std::pair<uint32_t, ObjectState>> objStart;
+        std::vector<CompEntry> comps;
+    };
+    struct LoopPreview {
+        SceneObject* obj = nullptr;
+        uint32_t edge = kInvalid;
+        float t = 0.5f;
+        ops::EdgeLoopPlan plan;
+        std::vector<Vec3> lines; // world space
+    };
+    struct HoverComp {
+        SceneObject* obj = nullptr;
+        uint32_t index = kInvalid;
+    };
+    enum class Drag { None, Tumble, Track, Dolly, Marquee, Manip, SoftRadius, Menu, LoopSlide };
+
+    // layout
+    std::vector<int> visibleSlots() const;
+    QRect slotRect(int slot) const;
+    int slotAt(QPoint p) const;
+    ViewParams viewParams(int slot) const;
+    GizmoView gizmoView(int slot) const;
+    Vec3 project(int slot, const Vec3& world) const; // logical px (x, y) + ndc depth
+    Ray rayAt(int slot, QPoint p) const;
+
+    // picking
+    bool renderPick(int slot, QRect logicalRect, bool selectedOnly, std::vector<uint32_t>& ids, std::vector<float>& depth, QRect& devRect);
+    Hit decode(uint32_t objId, uint32_t prim) const;
+    Hit pickSurface(int slot, QPoint p, int radius, bool selectedOnly);
+    uint32_t pickVertex(int slot, QPoint p, SceneObject*& obj);
+    uint32_t pickEdge(int slot, QPoint p, bool selectedOnly, SceneObject*& obj, float* tOut = nullptr);
+    void clickSelect(int slot, QPoint p, SelectOp op);
+    void marqueeSelect(int slot, QRect r, SelectOp op);
+    static SelectOp opFromModifiers(Qt::KeyboardModifiers m);
+
+    // manipulators
+    bool gizmoFrame(int slot, GizmoFrame& f) const;
+    void beginManip(int slot, Handle h, QPoint p);
+    void updateManip(QPoint p);
+    void endManip();
+
+    // tools
+    void updateLoopPreview(int slot, QPoint p, bool keepEdge = false);
+    void updateHover(int slot, QPoint p);
+    void drawOverlays(int slot, const ViewParams& vp);
+    void drawHud(class QPainter& p);
+    AABB selectionBounds(bool componentsOnly) const;
+
+    Scene* scene_;
+    Renderer renderer_;
+    bool glReady_ = false;
+    GLuint pickFbo_ = 0, pickTex_ = 0, pickDepth_ = 0;
+    QSize pickSize_;
+
+    std::array<Camera, 4> cams_ = {Camera::make(ViewKind::Persp), Camera::make(ViewKind::Top), Camera::make(ViewKind::Front),
+                                   Camera::make(ViewKind::Side)};
+    bool quad_ = false;
+    int single_ = 0;
+    int active_ = 0;
+
+    Drag drag_ = Drag::None;
+    int dragSlot_ = 0;
+    QPoint pressPos_, lastPos_, mousePos_;
+    Qt::KeyboardModifiers pressMods_;
+    Handle hover_ = Handle::None;
+    Handle lastHandle_[3] = {Handle::Center, Handle::View, Handle::Center};
+    Manip manip_;
+    LoopPreview loop_;
+    HoverComp hoverComp_;
+
+    bool bHeld_ = false, bUsed_ = false, xHeld_ = false, jHeld_ = false, spaceHeld_ = false, hotboxShown_ = false;
+    QElapsedTimer spaceTimer_;
+    QTimer hotboxTimer_;
+    int bgIndex_ = 0;
+    QString transientText_;
+};
+
+} // namespace facet

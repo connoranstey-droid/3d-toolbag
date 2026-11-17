@@ -225,6 +225,33 @@ inline Mat4 Mat4::inverse() const
     return r;
 }
 
+// Rotation of `deg` degrees about a unit axis (right-handed).
+inline Mat4 rotateAxis(const Vec3& axis, float deg)
+{
+    Vec3 a = normalize(axis);
+    float c = std::cos(radians(deg)), s = std::sin(radians(deg)), t = 1 - c;
+    Mat4 r;
+    r.at(0, 0) = t * a.x * a.x + c;       r.at(0, 1) = t * a.x * a.y - s * a.z; r.at(0, 2) = t * a.x * a.z + s * a.y;
+    r.at(1, 0) = t * a.x * a.y + s * a.z; r.at(1, 1) = t * a.y * a.y + c;       r.at(1, 2) = t * a.y * a.z - s * a.x;
+    r.at(2, 0) = t * a.x * a.z - s * a.y; r.at(2, 1) = t * a.y * a.z + s * a.x; r.at(2, 2) = t * a.z * a.z + c;
+    return r;
+}
+
+// Inverse of Mat4::rotateXYZ for a pure rotation matrix (degrees).
+inline Vec3 eulerXYZ(const Mat4& m)
+{
+    float sy = std::clamp(-m.at(2, 0), -1.0f, 1.0f);
+    float y = std::asin(sy), x, z;
+    if (std::abs(sy) < 0.99999f) {
+        x = std::atan2(m.at(2, 1), m.at(2, 2));
+        z = std::atan2(m.at(1, 0), m.at(0, 0));
+    } else {
+        x = std::atan2(-m.at(1, 2), m.at(1, 1));
+        z = 0;
+    }
+    return {degrees(x), degrees(y), degrees(z)};
+}
+
 struct AABB {
     Vec3 lo{std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
     Vec3 hi{-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max()};
