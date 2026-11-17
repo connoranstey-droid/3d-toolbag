@@ -25,6 +25,7 @@ add_library(facet_core SHARED
   src/mesh/BevelBridge.cpp
   src/mesh/UVOps.cpp
   src/mesh/BVH.cpp
+  src/mesh/Sculpt.cpp
   src/mesh/ObjIO.cpp
 )
 target_include_directories(facet_core PUBLIC src)

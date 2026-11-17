@@ -2,6 +2,7 @@
 #include "ui/MainWindow.h"
 #include "ui/PluginManager.h"
 #include "mesh/MeshOps.h"
+#include "mesh/Sculpt.h"
 #include "viewport/Viewport.h"
 
 #include <QApplication>
@@ -75,6 +76,51 @@ static void buildDemo(MainWindow& w, const QString& variant)
         modeling::layoutUVs(s);
         w.setChecker(true);
         w.openUVEditor();
+        s.undo.setClean();
+        return;
+    }
+    if (variant == "sculpt") {
+        modeling::createPrimitive(s, "polySphere");
+        SceneObject* sp = s.lead();
+        sp->st.history->set("subdivisionsAxis", 160);
+        sp->st.history->set("subdivisionsHeight", 120);
+        sp->st.mesh = std::make_shared<Mesh>(buildPrimitive(*sp->st.history));
+        sp->st.history.reset();
+        sp->st.translate = {1.2f, 1.1f, 0};
+        Mesh& m = *sp->st.mesh;
+        sculpt::Stroke st;
+        auto stroke = [&](sculpt::Brush b, std::vector<Vec3> path, float r, float strength, bool inv = false, int repeat = 1) {
+            st.begin(m, &sp->mask, b, r, 0);
+            for (int k = 0; k < repeat; ++k)
+                for (size_t i = 0; i + 1 < path.size(); ++i)
+                    for (int j = 0; j < 12; ++j) st.dab({normalize(lerp(path[i], path[i + 1], j / 12.0f)), r, strength, inv});
+            st.end();
+        };
+        // Brow ridge, cheek volumes, a creased mouth line and eye sockets (mirrored in X).
+        stroke(sculpt::Brush::Draw, {{0.15f, 0.45f, 0.9f}, {0.55f, 0.4f, 0.75f}}, 0.22f, 1.0f, false, 3);
+        stroke(sculpt::Brush::Inflate, {{0.45f, -0.1f, 0.85f}, {0.5f, -0.2f, 0.8f}}, 0.3f, 0.8f, false, 3);
+        stroke(sculpt::Brush::Crease, {{0.0f, -0.45f, 0.9f}, {0.35f, -0.4f, 0.85f}}, 0.12f, 1.0f, false, 4);
+        stroke(sculpt::Brush::Draw, {{0.3f, 0.2f, 0.95f}, {0.32f, 0.22f, 0.94f}}, 0.16f, 1.0f, true, 6);
+        stroke(sculpt::Brush::Draw, {{0.0f, 0.1f, 1.0f}, {0.0f, -0.2f, 1.0f}}, 0.15f, 1.0f, false, 4); // nose
+        stroke(sculpt::Brush::Smooth, {{0.0f, 0.0f, 1.0f}, {0.4f, 0.0f, 0.9f}}, 0.35f, 0.3f);
+        sp->mask.assign(m.numVerts(), 0.0f);
+        stroke(sculpt::Brush::Mask, {{0.0f, 1.0f, 0.2f}, {0.0f, 0.8f, -0.6f}}, 0.45f, 1.0f, false, 2);
+        sp->maskVersion++;
+        m.touchPositions();
+        // Hard-surface piece with weighted normals.
+        modeling::createPrimitive(s, "polyCube");
+        SceneObject* box = s.lead();
+        box->st.translate = {-1.6f, 0.6f, 0};
+        box->st.scale = {1.5f, 1.2f, 1.2f};
+        s.setMode(SelectMode::Edge);
+        for (uint32_t e = 0; e < box->mesh().numEdges(); ++e) box->sel.edges.push_back(e);
+        modeling::bevel(s, 0.08f, 2, true);
+        s.setMode(SelectMode::Object);
+        modeling::softenEdges(s);
+        modeling::setWeightedNormals(s, 3.0f);
+        s.selectObjects({sp->id}, SelectOp::Replace);
+        s.symmetry = 0;
+        s.setTool(Tool::Sculpt);
         s.undo.setClean();
         return;
     }

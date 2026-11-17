@@ -58,6 +58,10 @@ struct GpuMesh {
     std::vector<uint32_t> texSrc; // split vertex -> a display corner (half-edge) it came from
     uint64_t texTopo = 0, texUvId = 0, texPosId = 0;
     bool texWithUV = false;
+    // sculpt mask
+    GLuint maskBuf = 0, texMask = 0;
+    bool maskOn = false, texMaskOn = false;
+    uint64_t maskVersion = 0, texMaskVersion = 0, texMaskTopo = 0;
     bool hasHard = false;
     // hard edges overlay
     GLuint hardVao = 0, hardIdx = 0;

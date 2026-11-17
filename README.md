@@ -97,6 +97,23 @@ by Assimp (binary 7.5 and ASCII) import correctly.
   undo step.
 - Plugins link only against the geometry core (`facet_core`, a shared library) and QtCore.
 
+**Sculpting** (Sculpt menu, Sculpt shelf, Sculpt tool in the tool box)
+- Brushes: Draw, Smooth, Grab, Inflate, Flatten, Pinch, Crease and Mask.
+- Maya-style controls: drag to sculpt, Shift for smooth, Ctrl to invert, B+drag for radius,
+  M+drag for strength. The brush circle and settings show in the viewport.
+- Respects Symmetry (status line). Masked areas are protected and shown darker; there are
+  Invert/Clear Mask commands.
+- Strokes hit the surface through the GPU depth buffer, so aiming stays exact on dense meshes.
+  Vertices are found through a spatial grid: about 1 ms per dab on a 1M-vertex mesh.
+- Each stroke is one undo step. "Subdivide for Sculpting" bakes another subdivision level for
+  more detail.
+
+**Weighted normals** (Mesh Display > Weighted Normals): large faces dominate shared vertex
+normals, so big flat panels shade perfectly flat next to small soft bevels, without hard edges.
+It is a live setting, recomputed as you edit, and is exported to FBX and saved with the scene.
+
+![sculpting and weighted normals](docs/sculpt.png)
+
 **Smart Unwrap plugin** (`plugins/smart_unwrap`, also in the UV menu): automatic mapping that
 produces good shells and uniform texel density.
 1. Grows shells by curvature (best-first, by normal deviation), stopping at hard edges and
@@ -178,6 +195,7 @@ Benchmark (`facet_plugintests`), Automatic → Smart Unwrap:
 | 6 | UV checker display |
 | Ctrl+Shift+U | UV Editor (inside it: W/E/R, F, A, Alt+MMB pan, wheel zoom) |
 | Ctrl+I | Import FBX / OBJ |
+| Sculpt tool | drag = brush, Shift = smooth, Ctrl = invert, B+drag radius, M+drag strength |
 | G | Repeat last command |
 | 1 / 2 / 3, PgUp / PgDn | Smooth preview off / cage + smooth / smooth, smooth level |
 | 4 / 5 | Wireframe / shaded |
@@ -214,10 +232,11 @@ so undo/redo just swaps mesh snapshots and everything stays in sync.
 
 ## Roadmap (high-poly / VFX priorities)
 
-1. Weighted normals / normal locking; displacement and normal baking.
-2. Offset Edge Loop, Slide Edge, Poke, Wedge; bevel with chamfer-mitering options; world-space symmetry.
-3. **Sculpting**: multires / dynamic-tessellation brushes (grab, smooth, crease, inflate, clay) on millions of polys, with masks and layers.
-4. UV: optimize (ARAP), straighten shells, texel-density tools, UDIM tiles, image textures.
-5. FBX: creases, multiple UV sets, materials/textures; USD and Alembic.
-6. Python scripting (`cmds`-like) and a Script Editor; customizable hotkeys and shelves.
-7. GPU subdivision via OpenSubdiv for very dense previews.
+1. Baking: normal / displacement / AO maps from high-poly to low-poly (ray cast via the BVH).
+2. Sculpt: multires levels, dynamic topology, layers, alphas/stencils, pen pressure.
+3. Offset Edge Loop, Slide Edge, Poke, Wedge; bevel with chamfer-mitering options; world-space symmetry.
+4. **Sculpting**: multires / dynamic-tessellation brushes (grab, smooth, crease, inflate, clay) on millions of polys, with masks and layers.
+5. UV: optimize (ARAP), straighten shells, texel-density tools, UDIM tiles, image textures.
+6. FBX: creases, multiple UV sets, materials/textures; USD and Alembic.
+7. Python scripting (`cmds`-like) and a Script Editor; customizable hotkeys and shelves.
+8. GPU subdivision via OpenSubdiv for very dense previews.

@@ -45,6 +45,7 @@ private:
     bool saveScene(bool saveAs);
     void showHotkeys();
     void bevelOptions();
+    void sculptSettings();
     void buildPluginMenus();
     bool pluginOptionsDialog(const struct PluginCommand& c);
     void showPluginManager();
@@ -65,7 +66,9 @@ private:
     QActionGroup* modeGroup_ = nullptr;
     QActionGroup* toolGroup_ = nullptr;
     QAction* modeActs_[4] = {};
-    QAction* toolActs_[8] = {};
+    QAction* toolActs_[9] = {};
+    QActionGroup* brushGroup_ = nullptr;
+    float weightPower_ = 3.0f;
     float bevelOffset_ = 0.1f;
     int bevelSegments_ = 1;
     bool bevelRound_ = true;

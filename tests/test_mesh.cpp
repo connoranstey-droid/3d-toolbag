@@ -6,6 +6,7 @@
 #include "mesh/Subdivision.h"
 #include "mesh/UVOps.h"
 #include "mesh/BVH.h"
+#include "mesh/Sculpt.h"
 
 #include <chrono>
 #include <cstdio>
@@ -509,6 +510,112 @@ static void testHardEdges()
     CHECK(hard > 0); // single chamfer: 45 deg turns -> hard
 }
 
+static void testWeightedNormals()
+{
+    // Rounded box: with weighting, corners of the big flat faces keep (almost) the face normal.
+    Mesh b = prim::cube(2, 1, 1);
+    IndexList all;
+    for (uint32_t e = 0; e < b.numEdges(); ++e) all.push_back(e);
+    ops::bevelEdges(b, all, {0.1f, 1, false});
+    ops::setEdgesHard(b, {}, false);
+    auto worst = [&](const Mesh& m) {
+        std::vector<Vec3> cn;
+        m.computeCornerNormals(cn);
+        float maxArea = 0;
+        uint32_t big = 0;
+        for (uint32_t f = 0; f < m.numFaces(); ++f) if (length(m.faceNormalRaw(f)) > maxArea) { maxArea = length(m.faceNormalRaw(f)); big = f; }
+        float w = 1;
+        for (uint32_t h = m.faceStart[big]; h < m.faceStart[big + 1]; ++h) w = std::min(w, dot(cn[h], m.faceNormal(big)));
+        return w;
+    };
+    float plain = worst(b);
+    b.normalWeightPower = 3.0f;
+    float weighted = worst(b);
+    std::printf("  biggest face corner alignment: plain %.4f, weighted %.4f\n", plain, weighted);
+    CHECK(weighted > plain && weighted > 0.995f);
+}
+
+static void testSculpt()
+{
+    Mesh s = prim::sphere(1, 64, 32);
+    const Vec3 top{0, 1, 0};
+    uint32_t topV = 0;
+    for (uint32_t v = 0; v < s.numVerts(); ++v) if (length(s.positions[v] - top) < length(s.positions[topV] - top)) topV = v;
+    // Draw raises the area under the brush and leaves the far side alone.
+    sculpt::Stroke st;
+    st.begin(s, nullptr, sculpt::Brush::Draw, 0.3f, -1);
+    for (int i = 0; i < 10; ++i) st.dab({top, 0.3f, 1.0f, false});
+    CHECK(s.positions[topV].y > 1.02f);
+    uint32_t bottomV = 0;
+    for (uint32_t v = 0; v < s.numVerts(); ++v) if (s.positions[v].y < s.positions[bottomV].y) bottomV = v;
+    CHECK(std::abs(s.positions[bottomV].y + 1.0f) < 1e-6f);
+    CHECK(!st.touched().empty() && st.touched().size() == st.before().size());
+    st.end();
+    // Smooth reduces noise.
+    Mesh n = prim::sphere(1, 48, 24);
+    uint32_t seed = 12345;
+    for (auto& p : n.positions) { seed = seed * 1664525u + 1013904223u; p = p * (1.0f + 0.03f * (float(seed >> 8) / 16777216.0f - 0.5f)); }
+    auto roughness = [](const Mesh& m) {
+        double mean = 0, r = 0;
+        for (auto& p : m.positions) mean += length(p);
+        mean /= m.numVerts();
+        for (auto& p : m.positions) r += std::abs(length(p) - mean);
+        return r / m.numVerts() / mean;
+    };
+    double r0 = roughness(n);
+    st.begin(n, nullptr, sculpt::Brush::Smooth, 3.0f, -1);
+    for (int i = 0; i < 5; ++i) st.dab({{0, 0, 0}, 3.0f, 1.0f, false});
+    st.end();
+    std::printf("  smooth: roughness %.4f -> %.4f\n", r0, roughness(n));
+    CHECK(roughness(n) < r0 * 0.6);
+    // Mask protects vertices.
+    Mesh mk = prim::sphere(1, 64, 32);
+    std::vector<float> mask(mk.numVerts(), 0.0f);
+    st.begin(mk, &mask, sculpt::Brush::Mask, 0.4f, -1);
+    st.dab({top, 0.4f, 1.0f, false});
+    st.end();
+    CHECK(mask[topV] > 0.9f);
+    Vec3 before = mk.positions[topV];
+    st.begin(mk, &mask, sculpt::Brush::Draw, 0.4f, -1);
+    for (int i = 0; i < 10; ++i) st.dab({top, 0.4f, 1.0f, false});
+    st.end();
+    CHECK(length(mk.positions[topV] - before) < 1e-5f);
+    // Symmetry: drawing at +X also raises -X.
+    Mesh sy = prim::sphere(1, 64, 32);
+    uint32_t px = 0, nx = 0;
+    for (uint32_t v = 0; v < sy.numVerts(); ++v) {
+        if (sy.positions[v].x > sy.positions[px].x) px = v;
+        if (sy.positions[v].x < sy.positions[nx].x) nx = v;
+    }
+    st.begin(sy, nullptr, sculpt::Brush::Draw, 0.3f, 0);
+    for (int i = 0; i < 8; ++i) st.dab({{1, 0, 0}, 0.3f, 1.0f, false});
+    st.end();
+    CHECK(sy.positions[px].x > 1.02f && std::abs(sy.positions[px].x + sy.positions[nx].x) < 1e-4f);
+    // Grab follows the offset with falloff.
+    Mesh g = prim::sphere(1, 64, 32);
+    st.begin(g, nullptr, sculpt::Brush::Grab, 0.5f, -1);
+    st.dab({top, 0.5f, 1.0f, false});
+    st.grab({0.3f, 0, 0});
+    st.end();
+    CHECK(g.positions[topV].x > 0.25f);
+    // Flatten pulls a bump back toward the plane.
+    Mesh fl = prim::sphere(1, 64, 32);
+    st.begin(fl, nullptr, sculpt::Brush::Flatten, 0.6f, -1);
+    for (int i = 0; i < 20; ++i) st.dab({top, 0.6f, 1.0f, false});
+    st.end();
+    CHECK(fl.positions[topV].y < 0.995f);
+    // Performance: one dab on a 1M-vertex mesh.
+    Mesh big = prim::sphere(1, 1024, 1000);
+    auto t0 = std::chrono::steady_clock::now();
+    st.begin(big, nullptr, sculpt::Brush::Draw, 0.05f, -1);
+    auto t1 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; ++i) st.dab({{0, 1, 0}, 0.05f, 0.5f, false});
+    auto t2 = std::chrono::steady_clock::now();
+    st.end();
+    std::printf("  sculpt %u verts: stroke setup %.0f ms, %.2f ms per dab\n", big.numVerts(),
+                std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(t2 - t1).count() / 20);
+}
+
 static void testPerformance()
 {
     // A dense cage: ~100k quads to 1.6M quads at level 2.
@@ -536,7 +643,7 @@ int main()
         {"loops", testLoops}, {"delete/merge", testDeleteMerge}, {"mirror/separate", testMirrorSeparate},
         {"convert/grow", testConvertGrow}, {"obj", testObj}, {"uvs through ops", testUVsThroughOps},
         {"bevel", testBevel}, {"bridge/multicut/weld", testBridgeCut},
-        {"uv tools", testUVTools}, {"hard edges", testHardEdges}, {"bvh", testBVH}, {"performance", testPerformance}};
+        {"uv tools", testUVTools}, {"hard edges", testHardEdges}, {"weighted normals", testWeightedNormals}, {"sculpt", testSculpt}, {"bvh", testBVH}, {"performance", testPerformance}};
     for (auto& [name, fn] : tests) {
         int before = g_fail;
         fn();

@@ -2,6 +2,7 @@
 #include "util/Parallel.h"
 
 #include <atomic>
+#include <cmath>
 #include <unordered_map>
 
 namespace facet {
@@ -332,7 +333,20 @@ void Mesh::computeCornerNormals(std::vector<Vec3>& out, std::vector<uint32_t>* g
         if (faceVerts[heNext(h)] == faceVerts[t]) unite(heNext(h), t);
     }
     std::vector<Vec3> sum(H);
-    for (uint32_t h = 0; h < H; ++h) sum[find(h)] += fn[heFace[h]];
+    if (normalWeightPower > 0.0f) {
+        // fn is area * unit normal; scale by area^power (relative to the mean so magnitudes stay sane).
+        double mean = 0;
+        for (const Vec3& n : fn) mean += length(n);
+        mean = fn.empty() ? 1.0 : std::max(mean / double(fn.size()), 1e-30);
+        std::vector<Vec3> wn(fn.size());
+        for (size_t f = 0; f < fn.size(); ++f) {
+            float a = float(length(fn[f]) / mean);
+            wn[f] = fn[f] * std::pow(std::max(a, 1e-12f), normalWeightPower);
+        }
+        for (uint32_t h = 0; h < H; ++h) sum[find(h)] += wn[heFace[h]];
+    } else {
+        for (uint32_t h = 0; h < H; ++h) sum[find(h)] += fn[heFace[h]];
+    }
     out.resize(H);
     if (groupOut) groupOut->resize(H);
     for (uint32_t h = 0; h < H; ++h) {

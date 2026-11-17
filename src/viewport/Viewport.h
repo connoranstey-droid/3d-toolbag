@@ -121,7 +121,18 @@ private:
         QPoint pressPos;
         bool shiftPress = false;
     };
-    enum class Drag { None, Tumble, Track, Dolly, Marquee, Manip, SoftRadius, Menu, LoopSlide, Cut, Weld, QuadVert, QuadRelax, QuadShift, QuadExtend };
+    struct SculptState {
+        SceneObject* obj = nullptr;
+        sculpt::Stroke stroke;
+        Vec3 lastLocal;
+        float radiusLocal = 0.1f;
+        Mat4 inv;
+        Vec3 grabStartWorld, grabNormal;
+        bool invert = false;
+        sculpt::Brush brush = sculpt::Brush::Draw;
+    };
+    enum class Drag { None, Tumble, Track, Dolly, Marquee, Manip, SoftRadius, Menu, LoopSlide, Cut, Weld, QuadVert, QuadRelax, QuadShift, QuadExtend,
+                      Sculpt, BrushRadius, BrushStrength };
 
     // layout
     std::vector<int> visibleSlots() const;
@@ -162,6 +173,11 @@ private:
     void quadRelease(QPoint p);
     void quadRelax(int slot, QPoint p);
     bool liveHit(int slot, QPoint p, Vec3& world);
+    // Sculpting
+    bool surfaceHit(int slot, QPoint p, bool selectedOnly, SceneObject*& obj, Vec3& world);
+    void sculptPress(int slot, QPoint p, Qt::KeyboardModifiers mods);
+    void sculptMove(QPoint p);
+    void sculptRelease();
     AABB selectionBounds(bool componentsOnly) const;
 
     Scene* scene_;
@@ -178,7 +194,7 @@ private:
 
     Drag drag_ = Drag::None;
     int dragSlot_ = 0;
-    QPoint pressPos_, lastPos_, mousePos_;
+    QPoint pressPos_, lastPos_, mousePos_{-10000, -10000};
     Qt::KeyboardModifiers pressMods_;
     Handle hover_ = Handle::None;
     Handle lastHandle_[3] = {Handle::Center, Handle::View, Handle::Center};
@@ -189,6 +205,8 @@ private:
     WeldState weld_;
     QuadState qd_;
     bool tabHeld_ = false;
+    bool mHeld_ = false;
+    SculptState sc_;
 
     bool bHeld_ = false, bUsed_ = false, xHeld_ = false, jHeld_ = false, spaceHeld_ = false, hotboxShown_ = false;
     QElapsedTimer spaceTimer_;

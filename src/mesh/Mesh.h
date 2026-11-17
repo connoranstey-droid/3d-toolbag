@@ -44,6 +44,9 @@ public:
     std::vector<MeshEdge> edges;
     std::vector<float> edgeCrease;  // subdivision sharpness per edge (0 = smooth)
     std::vector<uint8_t> edgeHard;  // 1 = hard (shading break / normal split), 0 = soft
+    // Weighted normals: 0 = plain area weighting. Higher values make large faces dominate the shared
+    // normal (face weight = area^(1 + power)), so big flat faces stay flat next to small bevels.
+    float normalWeightPower = 0.0f;
     std::vector<uint32_t> vertEdgeStart, vertEdges;
     std::vector<uint32_t> vertFaceStart, vertFaces;
 

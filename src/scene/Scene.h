@@ -3,6 +3,7 @@
 #include "mesh/MeshOps.h"
 #include "mesh/Subdivision.h"
 #include "mesh/BVH.h"
+#include "mesh/Sculpt.h"
 
 #include <QObject>
 #include <QString>
@@ -17,7 +18,7 @@ namespace facet {
 
 enum class SelectMode { Object, Vertex, Edge, Face };
 enum class SelectOp { Replace, Toggle, Add, Remove };
-enum class Tool { Select, Move, Rotate, Scale, InsertEdgeLoop, MultiCut, TargetWeld, QuadDraw };
+enum class Tool { Select, Move, Rotate, Scale, InsertEdgeLoop, MultiCut, TargetWeld, QuadDraw, Sculpt };
 enum class AxisOrient { World, Object, Normal };
 
 // Editable construction history for primitives (Channel Box "INPUTS").
@@ -53,6 +54,10 @@ public:
     ObjectState st;
     ComponentSelection sel;
     SubdivSurface subdiv;
+    // Sculpt mask (per cage vertex, 1 = protected). Not part of undo; reset when topology changes.
+    std::vector<float> mask;
+    uint64_t maskVersion = 1;
+    bool hasMask() const { return mask.size() == st.mesh->numVerts(); }
 
     Mat4 worldMatrix() const;
     Mesh& mesh() { return *st.mesh; }
@@ -121,6 +126,12 @@ public:
     // Ray (world) onto the live surface. Returns false if it misses.
     bool rayToLive(const Ray& worldRay, Vec3& hitWorld, Vec3* normalWorld = nullptr);
     bool closestOnLive(const Vec3& world, Vec3& outWorld, float maxDist = 1e30f);
+
+    struct SculptSettings {
+        sculpt::Brush brush = sculpt::Brush::Draw;
+        float radiusPx = 60.0f;
+        float strength = 0.5f;
+    } sculpt;
 
     // ---- tool state shared by UI and viewport ----
     Tool tool() const { return tool_; }

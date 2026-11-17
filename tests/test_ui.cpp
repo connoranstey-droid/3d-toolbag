@@ -435,6 +435,64 @@ int main(int argc, char** argv)
     }
     std::printf("%s smart unwrap plugin\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
 
+    // ---- sculpting through the viewport ----
+    {
+        s.clear();
+        s.setTool(Tool::Select);
+        s.setMode(SelectMode::Object);
+        M::createPrimitive(s, "polySphere");
+        SceneObject* sp = s.lead();
+        sp->st.history->set("subdivisionsAxis", 64);
+        sp->st.history->set("subdivisionsHeight", 48);
+        sp->st.mesh = std::make_shared<Mesh>(buildPrimitive(*sp->st.history));
+        vp->frameSelected();
+        s.setTool(Tool::Sculpt);
+        s.sculpt.brush = sculpt::Brush::Draw;
+        s.sculpt.strength = 1.0f;
+        vp->repaint();
+        const Camera& cam = vp->activeCamera();
+        Vec3 n = normalize(cam.eye());
+        Vec3 t1 = normalize(cross({0, 1, 0}, n));
+        auto maxR = [&] { float r = 0; for (auto& q : sp->mesh().positions) r = std::max(r, length(q)); return r; };
+        QPoint a = vp->worldToWidget(normalize(n - t1 * 0.3f)), b = vp->worldToWidget(normalize(n + t1 * 0.3f));
+        drag(vp, a, b);
+        float r1 = maxR();
+        std::printf("  after draw stroke max radius %.3f\n", r1);
+        CHECK(r1 > 1.01f);
+        CHECK(!sp->st.history.has_value());
+        key(vp, Qt::Key_Z, Qt::ControlModifier);
+        CHECK(maxR() < 1.0001f);
+        // Mask the region first: then the same stroke does nothing there.
+        s.sculpt.brush = sculpt::Brush::Mask;
+        drag(vp, a, b);
+        CHECK(sp->hasMask());
+        float masked = 0;
+        for (float m : sp->mask) masked = std::max(masked, m);
+        CHECK(masked > 0.5f);
+        vp->repaint(); // mask shading path
+        s.sculpt.brush = sculpt::Brush::Draw;
+        drag(vp, a, b);
+        std::printf("  masked stroke max radius %.3f\n", maxR());
+        CHECK(maxR() < 1.0f + (r1 - 1.0f) * 0.15f); // >85% of the effect blocked (mask fades at the brush rim)
+        M::clearMask(s);
+        // B + drag changes the radius.
+        float r0 = s.sculpt.radiusPx;
+        const bool softBefore = s.softSelect;
+        QTest::keyPress(vp, Qt::Key_B);
+        drag(vp, QPoint(100, 100), QPoint(160, 100));
+        QTest::keyRelease(vp, Qt::Key_B);
+        CHECK(s.sculpt.radiusPx > r0 * 1.3f);
+        CHECK(s.softSelect == softBefore); // B in sculpt mode never toggles soft select
+        s.setTool(Tool::Select);
+        // Weighted normals render path.
+        M::setWeightedNormals(s, 3.0f);
+        CHECK(sp->mesh().normalWeightPower == 3.0f);
+        vp->repaint();
+        key(vp, Qt::Key_Z, Qt::ControlModifier);
+        CHECK(sp->mesh().normalWeightPower == 0.0f);
+    }
+    std::printf("%s sculpt + weighted normals\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
     // ---- save / load roundtrip ----
     s.clear();
     M::createPrimitive(s, "polyCube");

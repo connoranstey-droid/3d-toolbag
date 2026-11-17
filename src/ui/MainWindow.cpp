@@ -235,15 +235,16 @@ void MainWindow::buildMenus()
     QMenu* mod = add("&Modify");
     toolGroup_ = new QActionGroup(this);
     const char* toolNames[] = {"&Select Tool", "&Move Tool", "&Rotate Tool", "S&cale Tool", "Insert &Edge Loop Tool", "&Multi-Cut Tool",
-                               "&Target Weld Tool", "&Quad Draw Tool"};
-    const char* toolKeys[] = {"Q", "W", "E", "R", "", "", "", ""};
-    for (int i = 0; i < 8; ++i) {
+                               "&Target Weld Tool", "&Quad Draw Tool", "Scu&lpt Tool"};
+    const char* toolKeys[] = {"Q", "W", "E", "R", "", "", "", "", ""};
+    for (int i = 0; i < 9; ++i) {
         Tool t = Tool(i);
         QList<QKeySequence> keys;
         if (toolKeys[i][0]) keys << QKeySequence(toolKeys[i]);
         toolActs_[i] = addAct(i < 4 ? mod : nullptr, toolNames[i], keys, [this, t] {
             if ((t == Tool::InsertEdgeLoop || t == Tool::MultiCut) && scene_->mode() == SelectMode::Object && scene_->lead()) scene_->setMode(SelectMode::Edge);
             if (t == Tool::TargetWeld && scene_->mode() == SelectMode::Object && scene_->lead()) scene_->setMode(SelectMode::Vertex);
+            if (t == Tool::Sculpt && scene_->mode() != SelectMode::Object) scene_->setMode(SelectMode::Object);
             if (t == Tool::QuadDraw) {
                 if (scene_->mode() != SelectMode::Object) scene_->setMode(SelectMode::Object);
                 if (!scene_->liveObject()) report("Quad Draw: make the high-poly mesh live first (Mesh Tools > Make Live)");
@@ -422,6 +423,14 @@ void MainWindow::buildMenus()
         normalAngle_ = float(a);
         return M::setNormalAngle(*scene_, normalAngle_);
     }, true);
+    addAct(md, "&Weighted Normals...", {}, [this] {
+        bool ok = false;
+        double p = QInputDialog::getDouble(this, "Weighted Normals", "Strength (0 = off; 2-4 typical for hard-surface):", weightPower_, 0, 10, 1, &ok);
+        if (!ok) return QString();
+        weightPower_ = float(p);
+        return M::setWeightedNormals(*scene_, weightPower_);
+    }, true);
+    addAct(md, "Clear Weighted Normals", {}, [&s] { return M::setWeightedNormals(s, 0.0f); });
     QAction* showHard = addAct(md, "Show Hard Edges", {}, nullptr);
     showHard->setCheckable(true);
     connect(showHard, &QAction::toggled, this, [this](bool on) { viewport_->options.showHardEdges = on; viewport_->update(); });
@@ -431,6 +440,31 @@ void MainWindow::buildMenus()
     addAct(md, "Smooth Preview: Smooth", {QKeySequence("3")}, [&s] { return M::setSmoothDisplay(s, 2); });
     addAct(md, "Increase Smooth Level", {QKeySequence(Qt::Key_PageUp)}, [&s] { return M::changeSmoothLevel(s, 1); });
     addAct(md, "Decrease Smooth Level", {QKeySequence(Qt::Key_PageDown)}, [&s] { return M::changeSmoothLevel(s, -1); });
+
+    // ---- Sculpt ----
+    QMenu* sm = add("S&culpt");
+    sm->addAction(toolActs_[8]);
+    sm->addSeparator();
+    brushGroup_ = new QActionGroup(this);
+    const sculpt::Brush brushes[] = {sculpt::Brush::Draw, sculpt::Brush::Smooth, sculpt::Brush::Grab, sculpt::Brush::Inflate,
+                                     sculpt::Brush::Flatten, sculpt::Brush::Pinch, sculpt::Brush::Crease, sculpt::Brush::Mask};
+    for (sculpt::Brush b : brushes) {
+        QAction* a = addAct(sm, QString("%1 Brush").arg(sculpt::brushName(b)), {}, [this, b] {
+            scene_->sculpt.brush = b;
+            if (scene_->tool() != Tool::Sculpt) toolActs_[8]->trigger();
+            viewport_->update();
+            return QString("Sculpt brush: %1").arg(sculpt::brushName(b));
+        });
+        a->setCheckable(true);
+        a->setChecked(b == sculpt::Brush::Draw);
+        brushGroup_->addAction(a);
+    }
+    sm->addSeparator();
+    addAct(sm, "Brush Settings...", {}, [this] { sculptSettings(); return QString(); });
+    addAct(sm, "Invert Mask", {}, [&s] { return M::invertMask(s); });
+    addAct(sm, "Clear Mask", {}, [&s] { return M::clearMask(s); });
+    sm->addSeparator();
+    addAct(sm, "Subdivide for Sculpting (bake 1 level)", {}, [&s] { return M::smooth(s, 1); }, true);
 
     // ---- UV ----
     QMenu* uvm = add("&UV");
@@ -577,6 +611,26 @@ void MainWindow::buildShelf()
         {"UV Editor", "Open the UV Editor", [this] { openUVEditor(); return QString(); }},
         {"Checker", "Toggle the viewport UV checker (6)", [this] { checkerAct_->toggle(); return QString(); }},
     });
+    {
+        std::vector<std::tuple<QString, QString, std::function<QString()>>> items;
+        const sculpt::Brush brushes[] = {sculpt::Brush::Draw, sculpt::Brush::Smooth, sculpt::Brush::Grab, sculpt::Brush::Inflate,
+                                         sculpt::Brush::Flatten, sculpt::Brush::Pinch, sculpt::Brush::Crease, sculpt::Brush::Mask};
+        for (sculpt::Brush b : brushes)
+            items.emplace_back(sculpt::brushName(b), "Sculpt brush", [this, b] {
+                scene_->sculpt.brush = b;
+                int i = int(b);
+                if (brushGroup_ && i < brushGroup_->actions().size()) brushGroup_->actions()[i]->setChecked(true);
+                if (scene_->tool() != Tool::Sculpt) toolActs_[8]->trigger();
+                viewport_->update();
+                return QString("Sculpt brush: %1").arg(sculpt::brushName(b));
+            });
+        items.emplace_back("|", "", nullptr);
+        items.emplace_back("Invert Mask", "", [&s] { return M::invertMask(s); });
+        items.emplace_back("Clear Mask", "", [&s] { return M::clearMask(s); });
+        items.emplace_back("Subdivide", "Bake one subdivision level for more detail", [&s] { return M::smooth(s, 1); });
+        items.emplace_back("Settings", "Brush radius / strength", [this] { sculptSettings(); return QString(); });
+        shelf("Sculpt", items);
+    }
     shelf("Subdiv", {
         {"Preview Off (1)", "", [&s] { return M::setSmoothDisplay(s, 0); }},
         {"Cage+Smooth (2)", "", [&s] { return M::setSmoothDisplay(s, 1); }},
@@ -600,8 +654,8 @@ void MainWindow::buildDocks()
     box->setObjectName("toolBox");
     box->setOrientation(Qt::Vertical);
     box->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    const char* short_[] = {"Select", "Move", "Rotate", "Scale", "Loop", "Cut", "Weld", "Quad"};
-    for (int i = 0; i < 8; ++i) {
+    const char* short_[] = {"Select", "Move", "Rotate", "Scale", "Loop", "Cut", "Weld", "Quad", "Sculpt"};
+    for (int i = 0; i < 9; ++i) {
         QToolButton* b = new QToolButton;
         b->setDefaultAction(toolActs_[i]);
         b->setText(short_[i]);
@@ -766,7 +820,8 @@ void MainWindow::updateHelpLine()
                                   "Insert Edge Loop: hover an edge to preview, click (or drag to slide) to insert.",
                                   "Multi-Cut: click points on edges/vertices, Enter or RMB to cut. Ctrl+click inserts an edge loop.",
                                   "Target Weld: drag from one vertex onto another to merge them.",
-                                  "Quad Draw: click to place dots on the live surface, Shift+click fills a quad, Shift+drag relaxes."};
+                                  "Quad Draw: click to place dots on the live surface, Shift+click fills a quad, Shift+drag relaxes.",
+                                  "Sculpt: drag on the mesh. Shift = smooth, Ctrl = invert, B+drag = radius, M+drag = strength."};
     statusBar()->showMessage(tools[int(scene_->tool())]);
 }
 
@@ -855,6 +910,7 @@ void MainWindow::showHotkeys()
 <tr><td><b>Quad Draw</b></td><td>click = dot, Shift+click = quad, Shift+drag = relax, Ctrl+click = delete / insert loop, Tab+drag = extend</td></tr>
 <tr><td><b>6</b></td><td>UV checker display; <b>Ctrl+Shift+U</b> UV Editor (W/E/R, F, A inside it)</td></tr>
 <tr><td><b>Ctrl+I</b></td><td>Import FBX / OBJ</td></tr>
+<tr><td><b>Sculpt tool</b></td><td>drag = brush, Shift = smooth, Ctrl = invert, B+drag = radius, M+drag = strength</td></tr>
 <tr><td><b>G</b></td><td>Repeat last command</td></tr>
 <tr><td><b>Ctrl+D</b></td><td>Duplicate</td></tr>
 <tr><td><b>Delete</b></td><td>Delete objects / faces / dissolve edges &amp; vertices</td></tr>
@@ -981,6 +1037,32 @@ void MainWindow::showPluginManager()
     auto* l = new QVBoxLayout(d);
     l->addWidget(tb);
     d->show();
+}
+
+void MainWindow::sculptSettings()
+{
+    QDialog d(this);
+    d.setWindowTitle("Sculpt Brush Settings");
+    auto* f = new QFormLayout(&d);
+    auto* rad = new QDoubleSpinBox;
+    rad->setRange(3, 2000);
+    rad->setValue(scene_->sculpt.radiusPx);
+    rad->setSuffix(" px");
+    auto* str = new QDoubleSpinBox;
+    str->setRange(0.01, 1.0);
+    str->setSingleStep(0.05);
+    str->setValue(scene_->sculpt.strength);
+    f->addRow("Radius (screen):", rad);
+    f->addRow("Strength:", str);
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+    if (d.exec() == QDialog::Accepted) {
+        scene_->sculpt.radiusPx = float(rad->value());
+        scene_->sculpt.strength = float(str->value());
+        viewport_->update();
+    }
 }
 
 void MainWindow::bevelOptions()

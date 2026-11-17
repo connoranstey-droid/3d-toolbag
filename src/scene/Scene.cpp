@@ -533,6 +533,7 @@ bool Scene::save(const QString& path, QString* error) const
         for (uint32_t e = 0; e < m.numEdges(); ++e)
             if (m.isHard(e)) hard.append(QJsonArray{double(m.edges[e].v0), double(m.edges[e].v1)});
         j["hardEdges"] = hard;
+        if (m.normalWeightPower > 0) j["normalWeightPower"] = m.normalWeightPower;
         if (m.hasUVs()) {
             j["uvs"] = encode(m.uvs);
             j["faceUVs"] = encode(m.faceUVs);
@@ -599,6 +600,7 @@ bool Scene::load(const QString& path, QString* error)
             QJsonArray a = c.toArray();
             m->setCrease(uint32_t(a[0].toDouble()), uint32_t(a[1].toDouble()), float(a[2].toDouble()));
         }
+        m->normalWeightPower = float(j["normalWeightPower"].toDouble(0.0));
         for (const QJsonValue& h : j["hardEdges"].toArray())
             m->setHard(uint32_t(h.toArray()[0].toDouble()), uint32_t(h.toArray()[1].toDouble()), true);
         if (j.contains("uvs")) {

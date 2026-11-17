@@ -13,14 +13,18 @@ const char* kMeshVS = R"(#version 410 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNrm;
 layout(location = 2) in vec2 aUV;
+layout(location = 3) in float aMask;
 uniform mat4 uMVP;
 uniform mat4 uModelView;
 uniform mat3 uNormalMat;
+uniform int uHasMask; // disabled attribute values are undefined after other draws: gate explicitly
 out vec3 vN;
 out vec3 vViewPos;
 out vec2 vUV;
+out float vMask;
 void main() {
     vUV = aUV;
+    vMask = uHasMask == 1 ? aMask : 0.0;
     vec4 vp = uModelView * vec4(aPos, 1.0);
     vViewPos = vp.xyz;
     vN = uNormalMat * aNrm;
@@ -33,6 +37,7 @@ const char* kMeshFS = R"(#version 410 core
 in vec3 vN;
 in vec3 vViewPos;
 in vec2 vUV;
+in float vMask;
 uniform vec3 uColor;
 uniform float uAlpha;
 uniform int uFlat;
@@ -60,6 +65,7 @@ void main() {
     vec3 h = normalize(key + v);
     col += vec3(0.22) * pow(max(dot(n, h), 0.0), 40.0);
     col += vec3(0.10) * pow(1.0 - max(dot(n, v), 0.0), 3.0) * (0.5 + 0.5 * max(dot(n, rimL), 0.0));
+    col *= mix(vec3(1.0), vec3(0.32, 0.36, 0.45), clamp(vMask, 0.0, 1.0)); // sculpt mask
     col = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 1.15));
     frag = vec4(col, uAlpha);
 }
@@ -191,9 +197,10 @@ bool Renderer::initialize()
 void Renderer::deleteGpu(QOpenGLFunctions_4_1_Core* gl, GpuMesh& g)
 {
     GLuint vaos[] = {g.vao, g.dWireVao, g.cVao, g.selEdgeVao, g.selTriVao, g.texVao, g.hardVao};
-    GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris, g.texPos, g.texNrm, g.texUV, g.texIdx, g.hardIdx};
+    GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris, g.texPos, g.texNrm, g.texUV, g.texIdx, g.hardIdx,
+                     g.maskBuf, g.texMask};
     gl->glDeleteVertexArrays(7, vaos);
-    gl->glDeleteBuffers(14, bufs);
+    gl->glDeleteBuffers(16, bufs);
 }
 
 void Renderer::cleanup()
@@ -238,7 +245,7 @@ void Renderer::syncObject(Scene& scene, SceneObject& obj)
         glGenVertexArrays(1, &g.selEdgeVao);
         glGenVertexArrays(1, &g.selTriVao);
         GLuint* bufs[] = {&g.pos, &g.nrm, &g.tri, &g.dWire, &g.cPos, &g.cWeight, &g.cEdges, &g.selEdges, &g.selTris,
-                          &g.texPos, &g.texNrm, &g.texUV, &g.texIdx, &g.hardIdx};
+                          &g.texPos, &g.texNrm, &g.texUV, &g.texIdx, &g.hardIdx, &g.maskBuf, &g.texMask};
         for (GLuint* b : bufs) glGenBuffers(1, b);
         glGenVertexArrays(1, &g.hardVao);
         glGenVertexArrays(1, &g.texVao);
@@ -275,6 +282,26 @@ void Renderer::syncObject(Scene& scene, SceneObject& obj)
     }
     const bool smooth = obj.displayFaceOrigin() != nullptr;
     uploadDisplay(obj, g);
+    // Sculpt mask (only when the display mesh is the cage).
+    const bool wantMask = !smooth && obj.hasMask();
+    if (wantMask != g.maskOn || (wantMask && g.maskVersion != obj.maskVersion)) {
+        if (wantMask) {
+            glBindBuffer(GL_ARRAY_BUFFER, g.maskBuf);
+            glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(obj.mask.size() * sizeof(float)), obj.mask.data(), GL_DYNAMIC_DRAW);
+        }
+        glBindVertexArray(g.vao);
+        if (wantMask) {
+            glBindBuffer(GL_ARRAY_BUFFER, g.maskBuf);
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(float), nullptr);
+        } else {
+            glDisableVertexAttribArray(3);
+        }
+        glBindVertexArray(0);
+        g.maskOn = wantMask;
+        g.maskVersion = obj.maskVersion;
+        g.texMaskVersion = 0;
+    }
     uploadCage(scene, obj, g, smooth);
     uploadSelection(scene, obj, g, smooth);
 }
@@ -311,7 +338,7 @@ void Renderer::uploadDisplay(SceneObject& obj, GpuMesh& g)
         g.dTopo = d.topologyId;
         g.dPos = 0;
         g.selKey = 0;
-        g.hasHard = d.hasHardEdges();
+        g.hasHard = d.hasHardEdges() || d.normalWeightPower > 0.0f;
         // Hard edges of the cage (for the "show hard edges" overlay).
         const Mesh& c = obj.mesh();
         std::vector<uint32_t> he;
@@ -385,6 +412,28 @@ bool Renderer::uploadSplit(SceneObject& obj, GpuMesh& g, bool withUV)
         glBindBuffer(GL_ARRAY_BUFFER, g.texNrm);
         glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(n.size() * sizeof(Vec3)), n.data(), GL_DYNAMIC_DRAW);
         g.texPosId = d.positionId;
+    }
+    // Mask on the split vertices.
+    const bool wantMask = obj.hasMask() && &d == &obj.mesh();
+    if (wantMask && (g.texMaskVersion != obj.maskVersion || g.texMaskTopo != g.texTopo)) {
+        std::vector<float> mk(g.texSrc.size());
+        for (size_t i = 0; i < g.texSrc.size(); ++i) mk[i] = obj.mask[d.faceVerts[g.texSrc[i]]];
+        glBindBuffer(GL_ARRAY_BUFFER, g.texMask);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(mk.size() * sizeof(float)), mk.data(), GL_DYNAMIC_DRAW);
+        g.texMaskVersion = obj.maskVersion;
+        g.texMaskTopo = g.texTopo;
+    }
+    if (wantMask != g.texMaskOn) {
+        glBindVertexArray(g.texVao);
+        if (wantMask) {
+            glBindBuffer(GL_ARRAY_BUFFER, g.texMask);
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(float), nullptr);
+        } else {
+            glDisableVertexAttribArray(3);
+        }
+        glBindVertexArray(0);
+        g.texMaskOn = wantMask;
     }
     return true;
 }
@@ -554,7 +603,7 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
         GLint uMVP = glGetUniformLocation(meshProg_, "uMVP"), uMV = glGetUniformLocation(meshProg_, "uModelView"),
               uNM = glGetUniformLocation(meshProg_, "uNormalMat"), uColor = glGetUniformLocation(meshProg_, "uColor"),
               uAlpha = glGetUniformLocation(meshProg_, "uAlpha"), uFlat = glGetUniformLocation(meshProg_, "uFlat"),
-              uChecker = glGetUniformLocation(meshProg_, "uChecker");
+              uChecker = glGetUniformLocation(meshProg_, "uChecker"), uHasMask = glGetUniformLocation(meshProg_, "uHasMask");
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(1.0f, 1.0f);
         if (opt.xray) {
@@ -582,11 +631,13 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
             }
             const bool tex = opt.textured && !live && o->displayMesh().hasUVs();
             if ((tex || g->hasHard) && uploadSplit(*o, *g, tex)) {
+                glUniform1i(uHasMask, g->texMaskOn ? 1 : 0);
                 glUniform1i(uChecker, tex ? 1 : 0);
                 glBindVertexArray(g->texVao);
                 glDrawElements(GL_TRIANGLES, g->texIndexCount, GL_UNSIGNED_INT, nullptr);
                 glUniform1i(uChecker, 0);
             } else {
+                glUniform1i(uHasMask, g->maskOn ? 1 : 0);
                 glBindVertexArray(g->vao);
                 glDrawElements(GL_TRIANGLES, g->triIndexCount, GL_UNSIGNED_INT, nullptr);
             }
@@ -618,7 +669,8 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
         if (sel && !hilite) wire = (o == lead) ? Vec4{0.26f, 1.0f, 0.64f, 1.0f} : Vec4{1.0f, 1.0f, 1.0f, 1.0f};
         if (hilite) wire = Vec4{0.33f, 0.47f, 0.95f, 1.0f};
 
-        bool drawCage = !shaded || hilite || sel || opt.wireOnShaded || smooth == 1;
+        const bool sculpting = scene.tool() == Tool::Sculpt && shaded;
+        bool drawCage = !shaded || hilite || (sel && !sculpting) || opt.wireOnShaded || smooth == 1;
         bool drawSmoothWire = smooth == 2 && (!shaded || opt.wireOnShaded) && !sel;
         if (smooth == 2 && !sel && !(shaded && opt.wireOnShaded)) drawCage = false;
         if (smooth == 2 && !shaded && !sel) drawCage = false;

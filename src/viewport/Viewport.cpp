@@ -446,6 +446,28 @@ void Viewport::drawHud(QPainter& p)
             p.drawRect(mr);
         }
     }
+    if (scene_->tool() == Tool::Sculpt && underMouse() && rect().contains(mousePos_)) {
+        static const QColor colors[] = {QColor(120, 200, 255), QColor(160, 255, 160), QColor(255, 200, 90), QColor(255, 140, 220),
+                                        QColor(220, 220, 120), QColor(255, 120, 120), QColor(255, 160, 80), QColor(170, 170, 255)};
+        const auto b = drag_ == Drag::Sculpt ? sc_.brush : scene_->sculpt.brush;
+        QColor c = colors[int(b)];
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(QPen(c, 1.5));
+        p.setBrush(Qt::NoBrush);
+        const float rpx = scene_->sculpt.radiusPx;
+        p.drawEllipse(QPointF(mousePos_), rpx, rpx);
+        p.setPen(QPen(c, 1, Qt::DotLine));
+        p.drawEllipse(QPointF(mousePos_), rpx * scene_->sculpt.strength, rpx * scene_->sculpt.strength);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        QRect r = slotRect(active_);
+        p.setPen(c);
+        p.drawText(r.x() + 12, r.bottom() - 44,
+                   QString("Sculpt %1   radius %2px   strength %3   ·   B+drag radius · M+drag strength · Shift = smooth · Ctrl = invert%4")
+                       .arg(sculpt::brushName(b))
+                       .arg(int(rpx))
+                       .arg(scene_->sculpt.strength, 0, 'f', 2)
+                       .arg(scene_->symmetry >= 0 ? QString(" · symmetry %1").arg(QChar("XYZ"[scene_->symmetry])) : QString()));
+    }
     if (scene_->tool() == Tool::QuadDraw && drag_ == Drag::QuadRelax) {
         p.setPen(QPen(QColor(120, 220, 255), 1));
         p.setBrush(Qt::NoBrush);
@@ -1426,6 +1448,122 @@ void Viewport::quadRelease(QPoint p)
 }
 
 // ------------------------------------------------------------------------------------------
+// Sculpting
+
+bool Viewport::surfaceHit(int slot, QPoint p, bool selectedOnly, SceneObject*& obj, Vec3& world)
+{
+    std::vector<uint32_t> ids;
+    std::vector<float> depth;
+    QRect dr;
+    const int r = 2;
+    if (!renderPick(slot, QRect(p.x() - r, p.y() - r, 2 * r + 1, 2 * r + 1), selectedOnly, ids, depth, dr)) return false;
+    const float dpr = float(devicePixelRatioF());
+    const float cx = p.x() * dpr, cy = pickSize_.height() - p.y() * dpr;
+    float best = 1e9f;
+    int bx = -1, by = -1;
+    for (int y = 0; y < dr.height(); ++y)
+        for (int x = 0; x < dr.width(); ++x) {
+            size_t k = size_t(y) * dr.width() + x;
+            if (!ids[k * 2] || depth[k] >= 1.0f) continue;
+            float d = std::hypot(dr.x() + x + 0.5f - cx, dr.y() + y + 0.5f - cy);
+            if (d < best) { best = d; bx = x; by = y; }
+        }
+    if (bx < 0) return false;
+    size_t k = size_t(by) * dr.width() + bx;
+    obj = scene_->find(ids[k * 2]);
+    if (!obj) return false;
+    ViewParams vp = viewParams(slot);
+    float px = dr.x() + bx + 0.5f, py = dr.y() + by + 0.5f;
+    Vec3 ndc{(px - vp.x) / vp.w * 2.0f - 1.0f, (py - vp.y) / vp.h * 2.0f - 1.0f, depth[k] * 2.0f - 1.0f};
+    world = vp.viewProj.inverse().project(ndc);
+    return true;
+}
+
+void Viewport::sculptPress(int slot, QPoint p, Qt::KeyboardModifiers mods)
+{
+    SceneObject* obj = nullptr;
+    Vec3 hit;
+    // Prefer the selected mesh; fall back to whatever is under the cursor (and select it).
+    if (!surfaceHit(slot, p, !scene_->selectedObjects().empty(), obj, hit) && !surfaceHit(slot, p, false, obj, hit)) return;
+    if (!scene_->isSelected(obj->id)) scene_->selectObjects({obj->id}, SelectOp::Replace);
+    if (obj->displayFaceOrigin()) emit message("Sculpting the cage: bake with Mesh > Smooth (or press 1) to sculpt the dense surface");
+    const Camera& cam = cams_[size_t(slot)];
+    float depth = std::max(cam.nearClip(), dot(hit - cam.eye(), cam.forward()));
+    float rWorld = scene_->sculpt.radiusPx * cam.worldPerPixel(float(slotRect(slot).height()), depth);
+    Vec3 sc = obj->st.scale;
+    float scale = std::max((std::abs(sc.x) + std::abs(sc.y) + std::abs(sc.z)) / 3.0f, 1e-6f);
+    sc_.obj = obj;
+    sc_.inv = obj->worldMatrix().inverse();
+    sc_.radiusLocal = rWorld / scale;
+    sc_.brush = (mods & Qt::ShiftModifier) ? sculpt::Brush::Smooth : scene_->sculpt.brush;
+    sc_.invert = mods & Qt::ControlModifier;
+    if (sc_.brush == sculpt::Brush::Mask && !obj->hasMask()) obj->mask.assign(obj->mesh().numVerts(), 0.0f);
+    sc_.stroke.begin(*obj->st.mesh, &obj->mask, sc_.brush, sc_.radiusLocal, scene_->symmetry);
+    sc_.lastLocal = sc_.inv.transformPoint(hit);
+    sc_.grabStartWorld = hit;
+    sc_.grabNormal = cam.forward();
+    sc_.stroke.dab({sc_.lastLocal, sc_.radiusLocal, scene_->sculpt.strength, sc_.invert});
+    if (sc_.brush == sculpt::Brush::Mask) obj->maskVersion++;
+    drag_ = Drag::Sculpt;
+    scene_->notifyChanged();
+}
+
+void Viewport::sculptMove(QPoint p)
+{
+    if (!sc_.obj || !sc_.stroke.active()) return;
+    if (sc_.brush == sculpt::Brush::Grab) {
+        Vec3 pt;
+        if (rayPlane(rayAt(dragSlot_, p), sc_.grabStartWorld, sc_.grabNormal, pt)) {
+            sc_.stroke.grab(sc_.inv.transformDir(pt - sc_.grabStartWorld));
+            scene_->notifyChanged();
+        }
+        return;
+    }
+    SceneObject* obj = nullptr;
+    Vec3 hit;
+    if (!surfaceHit(dragSlot_, p, true, obj, hit) || obj != sc_.obj) return;
+    Vec3 local = sc_.inv.transformPoint(hit);
+    // Even dab spacing along the stroke.
+    const float spacing = std::max(sc_.radiusLocal * 0.2f, 1e-6f);
+    float dist = length(local - sc_.lastLocal);
+    int n = std::min(64, int(dist / spacing));
+    for (int i = 1; i <= n; ++i) {
+        Vec3 c = lerp(sc_.lastLocal, local, float(i) / float(n));
+        sc_.stroke.dab({c, sc_.radiusLocal, scene_->sculpt.strength, sc_.invert});
+    }
+    if (n > 0) {
+        sc_.lastLocal = local;
+        if (sc_.brush == sculpt::Brush::Mask) sc_.obj->maskVersion++;
+        scene_->notifyChanged();
+    }
+}
+
+void Viewport::sculptRelease()
+{
+    drag_ = Drag::None;
+    if (!sc_.obj) return;
+    std::vector<uint32_t> idx = sc_.stroke.touched();
+    std::vector<Vec3> before = sc_.stroke.before();
+    sc_.stroke.end();
+    SceneObject* obj = sc_.obj;
+    sc_.obj = nullptr;
+    if (idx.empty()) { update(); return; }
+    VertexMoveCommand::Entry e{obj->id, obj->st.mesh, idx, before, {}};
+    for (uint32_t v : idx) e.after.push_back(obj->mesh().positions[v]);
+    std::vector<VertexMoveCommand::Entry> entries;
+    entries.push_back(std::move(e));
+    const QString label = QString("Sculpt %1").arg(sculpt::brushName(sc_.brush));
+    scene_->undo.beginMacro(label);
+    if (obj->st.history) {
+        ObjectState b = obj->st;
+        obj->st.history.reset();
+        scene_->pushState(obj, b, "Delete history");
+    }
+    scene_->undo.push(new VertexMoveCommand(scene_, std::move(entries), label));
+    scene_->undo.endMacro();
+}
+
+// ------------------------------------------------------------------------------------------
 // Input
 
 void Viewport::mousePressEvent(QMouseEvent* e)
@@ -1462,7 +1600,15 @@ void Viewport::mousePressEvent(QMouseEvent* e)
     }
     if (e->button() == Qt::LeftButton && bHeld_) {
         bUsed_ = true;
-        drag_ = Drag::SoftRadius;
+        drag_ = scene_->tool() == Tool::Sculpt ? Drag::BrushRadius : Drag::SoftRadius;
+        return;
+    }
+    if (e->button() == Qt::LeftButton && mHeld_ && scene_->tool() == Tool::Sculpt) {
+        drag_ = Drag::BrushStrength;
+        return;
+    }
+    if (e->button() == Qt::LeftButton && scene_->tool() == Tool::Sculpt) {
+        sculptPress(slot, p, e->modifiers());
         return;
     }
     const Tool tool = scene_->tool();
@@ -1597,6 +1743,15 @@ void Viewport::mouseMoveEvent(QMouseEvent* e)
     case Drag::QuadRelax: quadRelax(dragSlot_, p); update(); break;
     case Drag::QuadExtend: update(); break;
     case Drag::Cut: break;
+    case Drag::Sculpt: sculptMove(p); update(); break;
+    case Drag::BrushRadius:
+        scene_->sculpt.radiusPx = std::clamp(scene_->sculpt.radiusPx * std::exp(float(d.x()) * 0.01f), 3.0f, 2000.0f);
+        update();
+        break;
+    case Drag::BrushStrength:
+        scene_->sculpt.strength = std::clamp(scene_->sculpt.strength + float(d.x()) * 0.005f, 0.01f, 1.0f);
+        update();
+        break;
     case Drag::None: {
         int slot = slotAt(p);
         Tool t = scene_->tool();
@@ -1606,6 +1761,7 @@ void Viewport::mouseMoveEvent(QMouseEvent* e)
             if (h != hover_) { hover_ = h; update(); }
             if (h != Handle::None) break;
         }
+        if (t == Tool::Sculpt) { update(); break; }
         if (t == Tool::InsertEdgeLoop) updateLoopPreview(slot, p);
         else if (t == Tool::QuadDraw) updateQuadHover(slot, p, e->modifiers() & Qt::ShiftModifier);
         else if (t == Tool::MultiCut) {
@@ -1631,6 +1787,9 @@ void Viewport::mouseReleaseEvent(QMouseEvent* e)
         break;
     }
     case Drag::Manip: endManip(); break;
+    case Drag::Sculpt: sculptRelease(); update(); break;
+    case Drag::BrushRadius:
+    case Drag::BrushStrength: drag_ = Drag::None; update(); break;
     case Drag::Weld: {
         drag_ = Drag::None;
         if (weld_.obj && weld_.src != kInvalid && weld_.dst != kInvalid) {
@@ -1755,6 +1914,9 @@ void Viewport::keyPressEvent(QKeyEvent* e)
         return;
     case Qt::Key_X: xHeld_ = true; return;
     case Qt::Key_J: jHeld_ = true; return;
+    case Qt::Key_M:
+        if (scene_->tool() == Tool::Sculpt) { mHeld_ = true; return; }
+        break;
     default: break;
     }
     QOpenGLWidget::keyPressEvent(e);
@@ -1777,7 +1939,7 @@ void Viewport::keyReleaseEvent(QKeyEvent* e)
     }
     case Qt::Key_B:
         bHeld_ = false;
-        if (!bUsed_) {
+        if (!bUsed_ && scene_->tool() != Tool::Sculpt) {
             scene_->softSelect = !scene_->softSelect;
             emit message(scene_->softSelect ? "Soft Select on (hold B + drag to resize)" : "Soft Select off");
             scene_->notifySelectionChanged();
@@ -1785,6 +1947,7 @@ void Viewport::keyReleaseEvent(QKeyEvent* e)
         return;
     case Qt::Key_X: xHeld_ = false; return;
     case Qt::Key_J: jHeld_ = false; return;
+    case Qt::Key_M: mHeld_ = false; return;
     default: break;
     }
     QOpenGLWidget::keyReleaseEvent(e);
@@ -1809,7 +1972,7 @@ void Viewport::leaveEvent(QEvent* e)
 
 void Viewport::focusOutEvent(QFocusEvent* e)
 {
-    bHeld_ = xHeld_ = jHeld_ = false;
+    bHeld_ = xHeld_ = jHeld_ = mHeld_ = false;
     if (spaceHeld_) {
         spaceHeld_ = false;
         hotboxTimer_.stop();

@@ -366,6 +366,45 @@ QString setNormalAngle(Scene& s, float degrees)
     return edgeShading(s, QString("Normal Angle %1°").arg(degrees), [degrees](Mesh& m, const std::vector<uint32_t>& e) { ops::setNormalAngle(m, e, degrees); });
 }
 
+QString setWeightedNormals(Scene& s, float power)
+{
+    auto objs = hilited(s);
+    if (objs.empty()) return "Weighted Normals: select meshes";
+    s.undo.beginMacro("Weighted Normals");
+    for (SceneObject* o : objs)
+        s.editMesh(o, "Weighted Normals", [&](Mesh& m) {
+            m.normalWeightPower = std::max(0.0f, power);
+            m.topologyId = nextVersionId(); // refresh shading caches
+            m.touchPositions();
+            return std::optional<std::vector<uint32_t>>(std::nullopt);
+        }, true);
+    s.undo.endMacro();
+    return power > 0 ? QString("Weighted normals on (strength %1)").arg(power) : QString("Weighted normals off");
+}
+
+QString invertMask(Scene& s)
+{
+    int n = 0;
+    for (SceneObject* o : hilited(s)) {
+        if (!o->hasMask()) o->mask.assign(o->mesh().numVerts(), 0.0f);
+        sculpt::invertMask(o->mask);
+        o->maskVersion++;
+        ++n;
+    }
+    s.notifyChanged();
+    return n ? "Inverted mask" : "Invert mask: select meshes";
+}
+
+QString clearMask(Scene& s)
+{
+    for (SceneObject* o : hilited(s)) {
+        o->mask.clear();
+        o->maskVersion++;
+    }
+    s.notifyChanged();
+    return "Cleared mask";
+}
+
 QString freezeTransforms(Scene& s)
 {
     auto objs = s.selectedObjects();

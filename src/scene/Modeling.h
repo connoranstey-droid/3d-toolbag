@@ -25,6 +25,11 @@ QString setCrease(Scene& s, float value);
 QString hardenEdges(Scene& s);
 QString softenEdges(Scene& s);
 QString setNormalAngle(Scene& s, float degrees);
+// Weighted normals (0 clears): large faces dominate shared normals.
+QString setWeightedNormals(Scene& s, float power);
+// Sculpt mask helpers
+QString invertMask(Scene& s);
+QString clearMask(Scene& s);
 QString freezeTransforms(Scene& s);
 QString centerPivot(Scene& s);
 QString resetTransforms(Scene& s);
