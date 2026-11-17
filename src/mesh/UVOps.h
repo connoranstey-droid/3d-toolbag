@@ -40,4 +40,16 @@ Vec2 center(const Mesh& m, const IndexList& uvSel);
 // Ratio of flipped (negative-area) faces in uv space: 0 = none.
 float flippedRatio(const Mesh& m);
 
+// Objective UV quality, measured in world space (`world` transform) over `faces` (all if empty).
+struct Quality {
+    uint32_t shells = 0;
+    uint32_t flippedFaces = 0;
+    float areaDistortion = 1.0f;  // area-weighted mean of max(s, 1/s), s = relative uv/3D area (1 = ideal)
+    float angleDistortion = 1.0f; // area-weighted mean of singular-value ratio s1/s2 (1 = conformal)
+    float densitySpread = 0.0f;   // coefficient of variation of texel density between shells (0 = uniform)
+    float efficiency = 0.0f;      // fraction of the 0..1 tile covered by uvs
+    float overlap = 0.0f;         // fraction of covered texels covered more than once
+};
+Quality measure(const Mesh& m, const Mat4& world = Mat4(), const IndexList& faces = {});
+
 } // namespace facet::uv

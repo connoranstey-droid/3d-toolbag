@@ -341,6 +341,56 @@ Mesh buildMesh(const Node& g)
     }
     m.buildTopology();
     m.touchUVs();
+
+    // Edge smoothing: explicit ByEdge smoothing (Maya) or, failing that, normal discontinuities.
+    m.edgeHard.assign(m.numEdges(), 0);
+    bool haveSmoothing = false;
+    if (const Node* ls = g.child("LayerElementSmoothing")) {
+        auto sm = intArray(ls->child("Smoothing"));
+        auto fedges = intArray(g.child("Edges"));
+        const std::string map = strChild(ls, "MappingInformationType");
+        if (map == "ByEdge" && !fedges.empty() && sm.size() == fedges.size()) {
+            // Edges[] holds polygon-vertex indices; the edge runs to the next corner of the polygon.
+            std::unordered_map<int64_t, uint32_t> cornerOfPV;
+            for (size_t c = 0; c < pvIndexOfCorner.size(); ++c) cornerOfPV[pvIndexOfCorner[c]] = uint32_t(c);
+            for (size_t i = 0; i < fedges.size(); ++i) {
+                auto it = cornerOfPV.find(fedges[i]);
+                if (it != cornerOfPV.end() && sm[i] == 0) m.edgeHard[m.heEdge[it->second]] = 1;
+            }
+            haveSmoothing = true;
+        } else if (map == "ByPolygon" && sm.size() == m.numFaces()) {
+            // Smoothing groups: an edge is hard when its faces share no group bit.
+            for (uint32_t e = 0; e < m.numEdges(); ++e) {
+                uint32_t h = m.edges[e].he, t = m.heTwin[h];
+                if (t != kInvalid && (sm[m.heFace[h]] & sm[m.heFace[t]]) == 0) m.edgeHard[e] = 1;
+            }
+            haveSmoothing = true;
+        }
+    }
+    if (!haveSmoothing) {
+        if (const Node* ln = g.child("LayerElementNormal")) {
+            auto nv = realArray(ln->child("Normals"));
+            auto ni = intArray(ln->child("NormalsIndex"));
+            const std::string map = strChild(ln, "MappingInformationType"), ref = strChild(ln, "ReferenceInformationType");
+            if ((map == "ByPolygonVertex") && !nv.empty()) {
+                const bool indexed = ref == "IndexToDirect";
+                auto normalOf = [&](uint32_t corner, Vec3& out) {
+                    int64_t k = pvIndexOfCorner[corner];
+                    if (indexed) k = k < int64_t(ni.size()) ? ni[size_t(k)] : -1;
+                    if (k < 0 || size_t(k) * 3 + 2 >= nv.size()) return false;
+                    out = normalize(Vec3{float(nv[size_t(k) * 3]), float(nv[size_t(k) * 3 + 1]), float(nv[size_t(k) * 3 + 2])});
+                    return true;
+                };
+                for (uint32_t e = 0; e < m.numEdges(); ++e) {
+                    uint32_t h = m.edges[e].he, t = m.heTwin[h];
+                    if (t == kInvalid) continue;
+                    Vec3 a1, a2, b1, b2;
+                    if (!normalOf(h, a1) || !normalOf(m.heNext(t), a2) || !normalOf(m.heNext(h), b1) || !normalOf(t, b2)) continue;
+                    if (dot(a1, a2) < 0.9998f || dot(b1, b2) < 0.9998f) m.edgeHard[e] = 1;
+                }
+            }
+        }
+    }
     return m;
 }
 
@@ -609,6 +659,7 @@ bool writeFbx(const std::string& path, const std::vector<FbxMesh>& meshes, std::
     for (const FbxMesh& fm : meshes) {
         const Mesh& m = fm.mesh;
         const int64_t gid = nextId++, mid = nextId++;
+        bool smoothingLayer = false;
         WNode& g = objects.child("Geometry");
         g.L(gid).S(fm.name + std::string("\0\1Geometry", 10)).S("Mesh");
         g.child("Properties70");
@@ -621,11 +672,29 @@ bool writeFbx(const std::string& path, const std::vector<FbxMesh>& meshes, std::
             for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h)
                 pvi.push_back(h + 1 == m.faceStart[f + 1] ? ~int32_t(m.faceVerts[h]) : int32_t(m.faceVerts[h]));
         g.child("PolygonVertexIndex").array('i', pvi);
-        // Smooth per-vertex normals expanded per polygon-vertex.
-        std::vector<Vec3> vn;
-        m.computeVertexNormals(vn);
+        // Per polygon-vertex normals honouring hard edges.
+        std::vector<Vec3> cn;
+        m.computeCornerNormals(cn);
         std::vector<double> normals;
-        for (uint32_t v : m.faceVerts) { normals.push_back(vn[v].x); normals.push_back(vn[v].y); normals.push_back(vn[v].z); }
+        for (const Vec3& n : cn) { normals.push_back(n.x); normals.push_back(n.y); normals.push_back(n.z); }
+        // Edges (as polygon-vertex indices) + per-edge smoothing, which Maya reads as soft/hard.
+        {
+            std::vector<int32_t> fedges;
+            std::vector<int32_t> smooth;
+            for (uint32_t e = 0; e < m.numEdges(); ++e) {
+                fedges.push_back(int32_t(m.edges[e].he));
+                smooth.push_back(m.isHard(e) ? 0 : 1);
+            }
+            g.child("Edges").array('i', fedges);
+            WNode& ls = g.child("LayerElementSmoothing");
+            ls.I(0);
+            ls.child("Version").I(102);
+            ls.child("Name").S("");
+            ls.child("MappingInformationType").S("ByEdge");
+            ls.child("ReferenceInformationType").S("Direct");
+            ls.child("Smoothing").array('i', smooth);
+            smoothingLayer = true;
+        }
         {
             WNode& ln = g.child("LayerElementNormal");
             ln.I(0);
@@ -665,6 +734,11 @@ bool writeFbx(const std::string& path, const std::vector<FbxMesh>& meshes, std::
             WNode& a = layer.child("LayerElement");
             a.child("Type").S("LayerElementNormal");
             a.child("TypedIndex").I(0);
+            if (smoothingLayer) {
+                WNode& sm = layer.child("LayerElement");
+                sm.child("Type").S("LayerElementSmoothing");
+                sm.child("TypedIndex").I(0);
+            }
             if (uv) {
                 WNode& b = layer.child("LayerElement");
                 b.child("Type").S("LayerElementUV");

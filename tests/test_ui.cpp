@@ -3,6 +3,7 @@
 #include "ui/MainWindow.h"
 #include "viewport/Viewport.h"
 #include "ui/UVEditor.h"
+#include "ui/PluginManager.h"
 #include "mesh/UVOps.h"
 
 #include <QApplication>
@@ -386,6 +387,53 @@ int main(int argc, char** argv)
         CHECK(torusOk);
     }
     std::printf("%s fbx via app\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- hard / soft edges ----
+    s.clear();
+    s.setTool(Tool::Select);
+    s.setMode(SelectMode::Object);
+    M::createPrimitive(s, "polyCube");
+    SceneObject* hc = s.lead();
+    CHECK(hc->mesh().hasHardEdges());
+    vp->repaint(); // split-normal render path
+    M::softenEdges(s);
+    CHECK(!hc->mesh().hasHardEdges());
+    vp->repaint();
+    M::setNormalAngle(s, 30.0f);
+    CHECK(hc->mesh().hasHardEdges());
+    key(vp, Qt::Key_Z, Qt::ControlModifier);
+    CHECK(!hc->mesh().hasHardEdges());
+    std::printf("%s hard/soft edges\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- Smart Unwrap plugin loaded by the app ----
+    {
+        PluginManager* pm = w.pluginManager();
+        CHECK(pm && !pm->plugins().empty());
+        const PluginCommand* smartCmd = nullptr;
+        if (pm)
+            for (const auto& lp : pm->plugins())
+                for (const auto& c : lp.commands)
+                    if (c.id == "smartUnwrap") smartCmd = &c;
+        CHECK(smartCmd != nullptr);
+        if (smartCmd) {
+            M::createPrimitive(s, "polyTorus");
+            SceneObject* t = s.lead();
+            Mesh before = t->mesh();
+            QString msg = pm->run(*smartCmd);
+            std::printf("  %s\n", qPrintable(msg));
+            auto q = uv::measure(t->mesh(), t->worldMatrix());
+            CHECK(q.flippedFaces == 0 && q.overlap < 0.005f && q.densitySpread < 0.03f);
+            CHECK(t->st.history.has_value()); // uv-only plugin keeps construction history
+            key(vp, Qt::Key_Z, Qt::ControlModifier);
+            CHECK(t->mesh().uvs.size() == before.uvs.size());
+            // The command is in the Plugins menu and the UV menu.
+            int found = 0;
+            for (QAction* a : w.findChildren<QAction*>())
+                if (a->text().startsWith("Smart Unwrap")) ++found;
+            CHECK(found >= 2);
+        }
+    }
+    std::printf("%s smart unwrap plugin\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
 
     // ---- save / load roundtrip ----
     s.clear();

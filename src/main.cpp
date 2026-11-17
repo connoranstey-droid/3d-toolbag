@@ -1,5 +1,7 @@
 #include "scene/Modeling.h"
 #include "ui/MainWindow.h"
+#include "ui/PluginManager.h"
+#include "mesh/MeshOps.h"
 #include "viewport/Viewport.h"
 
 #include <QApplication>
@@ -50,7 +52,7 @@ static void buildDemo(MainWindow& w, const QString& variant)
         const Mesh& m = cy->mesh();
         for (uint32_t e = 0; e < m.numEdges(); ++e)
             if (m.edges[e].faceCount == 2 && std::abs(std::abs(m.positions[m.edges[e].v0].y) - 1) < 1e-4f &&
-                std::abs(std::abs(m.positions[m.edges[e].v1].y) - 1) < 1e-4f)
+                std::abs(m.positions[m.edges[e].v0].y - m.positions[m.edges[e].v1].y) < 1e-4f) // rim edges only
                 cy->sel.edges.push_back(e);
         modeling::bevel(s, 0.15f, 4, true);
         s.setMode(SelectMode::Object);
@@ -71,6 +73,33 @@ static void buildDemo(MainWindow& w, const QString& variant)
         s.selectObjects({cy->id}, SelectOp::Replace);
         modeling::unfoldUVs(s);
         modeling::layoutUVs(s);
+        w.setChecker(true);
+        w.openUVEditor();
+        s.undo.setClean();
+        return;
+    }
+    if (variant == "smartuv") {
+        modeling::createPrimitive(s, "polyCube");
+        SceneObject* box = s.lead();
+        box->st.translate = {-1.7f, 0.6f, 0};
+        box->st.scale = {1.6f, 1.0f, 1.2f};
+        s.setMode(SelectMode::Edge);
+        for (uint32_t e = 0; e < box->mesh().numEdges(); ++e) box->sel.edges.push_back(e);
+        modeling::bevel(s, 0.12f, 3, true);
+        s.setMode(SelectMode::Object);
+        modeling::createPrimitive(s, "polySphere");
+        SceneObject* sp = s.lead();
+        sp->st.history->set("subdivisionsAxis", 48);
+        sp->st.history->set("subdivisionsHeight", 32);
+        sp->st.mesh = std::make_shared<Mesh>(buildPrimitive(*sp->st.history));
+        for (auto& p : sp->st.mesh->positions) p = p * (1.0f + 0.12f * std::sin(p.x * 3.1f) * std::cos(p.y * 2.7f));
+        sp->st.mesh->touchPositions();
+        sp->st.history.reset();
+        sp->st.translate = {1.4f, 1.0f, 0};
+        s.selectObjects({box->id, sp->id}, SelectOp::Replace);
+        for (const auto& lp : w.pluginManager()->plugins())
+            for (const auto& c : lp.commands)
+                if (c.id == "smartUnwrap") w.report(w.pluginManager()->run(c));
         w.setChecker(true);
         w.openUVEditor();
         s.undo.setClean();

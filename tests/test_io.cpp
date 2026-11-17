@@ -42,6 +42,12 @@ int main(int argc, char** argv)
         for (uint32_t v = 0; v < ref.mesh.numVerts(); ++v) same &= length(fm.mesh.positions[v] - ref.mesh.positions[v]) < 1e-5f;
         CHECK(same);
     }
+    // Hard edges survive the round trip (cube: all 12 hard; sphere: none).
+    for (const auto& fm : in) {
+        uint32_t hard = 0;
+        for (uint32_t e = 0; e < fm.mesh.numEdges(); ++e) hard += fm.mesh.isHard(e);
+        CHECK(hard == (fm.name == "box" ? (uint32_t)[&] { uint32_t h = 0; for (uint32_t e = 0; e < out[0].mesh.numEdges(); ++e) h += out[0].mesh.isHard(e); return h; }() : 0u));
+    }
     std::printf("%s binary round trip\n", g_fail ? "FAIL" : "PASS");
 
     // ---- ASCII (hand-written, Maya-style naming, parented model with pre-rotation) ----

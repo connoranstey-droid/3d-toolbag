@@ -68,6 +68,11 @@ struct CutPoint { uint32_t a = kInvalid, b = kInvalid; float t = 0.0f; };
 // Cuts consecutive points through shared faces. Returns the new edges.
 IndexList multiCut(Mesh& m, const std::vector<CutPoint>& points);
 
+// Hard / soft edges (shading). Empty edge list = every edge. Bumps topologyId so caches refresh.
+void setEdgesHard(Mesh& m, const IndexList& edges, bool hard);
+// Hardens edges whose faces meet at more than `degrees` (dihedral angle between normals), softens the rest.
+void setNormalAngle(Mesh& m, const IndexList& edges, float degrees);
+
 // ---- component helpers ----
 IndexList edgeLoop(const Mesh& m, uint32_t edge);
 IndexList edgeRing(const Mesh& m, uint32_t edge);

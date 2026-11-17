@@ -43,6 +43,7 @@ public:
     std::vector<uint32_t> heEdge;
     std::vector<MeshEdge> edges;
     std::vector<float> edgeCrease;  // subdivision sharpness per edge (0 = smooth)
+    std::vector<uint8_t> edgeHard;  // 1 = hard (shading break / normal split), 0 = soft
     std::vector<uint32_t> vertEdgeStart, vertEdges;
     std::vector<uint32_t> vertFaceStart, vertFaces;
 
@@ -127,6 +128,12 @@ public:
 
     bool hasCreases() const;
     void setCrease(uint32_t a, uint32_t b, float s);
+    bool hasHardEdges() const;
+    bool isHard(uint32_t e) const { return e < edgeHard.size() && edgeHard[e]; }
+    void setHard(uint32_t a, uint32_t b, bool hard);
+    // Per-corner (half-edge) normals: corners around a vertex share a normal unless separated by
+    // a hard edge (or a border). groupOut (optional) gives a representative corner per smoothing group.
+    void computeCornerNormals(std::vector<Vec3>& out, std::vector<uint32_t>* groupOut = nullptr) const;
 
     // Drops vertices referenced by no face. remapOut (if given) maps old -> new (kInvalid = removed).
     void removeUnusedVertices(std::vector<uint32_t>* remapOut = nullptr);

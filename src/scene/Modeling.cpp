@@ -325,6 +325,47 @@ QString setCrease(Scene& s, float value)
                       : QString("Creased %1 edges (sharpness %2)").arg(edgesTotal).arg(value >= 10 ? QString("full") : QString::number(value));
 }
 
+namespace {
+template <class Fn>
+QString edgeShading(Scene& s, const QString& label, Fn fn)
+{
+    auto objs = hilited(s);
+    if (objs.empty()) return label + ": select a mesh or edges";
+    int count = 0;
+    s.undo.beginMacro(label);
+    for (SceneObject* o : objs) {
+        std::vector<uint32_t> edges;
+        if (s.mode() != SelectMode::Object) {
+            edges = ops::convert(o->mesh(), s.compType(), o->compList(s.mode()), ops::Comp::Edge);
+            if (edges.empty()) continue;
+        }
+        auto keep = s.mode() == SelectMode::Object ? std::vector<uint32_t>{} : o->compList(s.mode());
+        s.editMesh(o, label, [&](Mesh& m) {
+            fn(m, edges);
+            count += int(edges.empty() ? m.numEdges() : edges.size());
+            return s.mode() == SelectMode::Object ? std::optional<std::vector<uint32_t>>(std::nullopt) : std::optional<std::vector<uint32_t>>(keep);
+        }, true);
+    }
+    s.undo.endMacro();
+    return QString("%1: %2 edges").arg(label).arg(count);
+}
+} // namespace
+
+QString hardenEdges(Scene& s)
+{
+    return edgeShading(s, "Harden Edge", [](Mesh& m, const std::vector<uint32_t>& e) { ops::setEdgesHard(m, e, true); });
+}
+
+QString softenEdges(Scene& s)
+{
+    return edgeShading(s, "Soften Edge", [](Mesh& m, const std::vector<uint32_t>& e) { ops::setEdgesHard(m, e, false); });
+}
+
+QString setNormalAngle(Scene& s, float degrees)
+{
+    return edgeShading(s, QString("Normal Angle %1°").arg(degrees), [degrees](Mesh& m, const std::vector<uint32_t>& e) { ops::setNormalAngle(m, e, degrees); });
+}
+
 QString freezeTransforms(Scene& s)
 {
     auto objs = s.selectedObjects();

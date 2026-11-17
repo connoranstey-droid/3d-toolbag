@@ -17,6 +17,7 @@ struct DrawOptions {
     bool flatShading = false;
     bool xray = false;
     bool showGrid = true;
+    bool showHardEdges = false;
     bool backfaceCulling = false;
     bool textured = false; // UV checker (Maya's 6 key)
 };
@@ -51,11 +52,16 @@ struct GpuMesh {
     uint64_t selKey = 0;
     std::vector<float> weights;
     std::vector<Vec3> normals; // CPU copy of display normals (reused by the textured path)
-    // textured (UV-split) display
+    // split-vertex display (hard edges and/or UV checker)
     GLuint texVao = 0, texPos = 0, texNrm = 0, texUV = 0, texIdx = 0;
     GLsizei texIndexCount = 0;
-    std::vector<uint32_t> texSrc; // split vertex -> display vertex
+    std::vector<uint32_t> texSrc; // split vertex -> a display corner (half-edge) it came from
     uint64_t texTopo = 0, texUvId = 0, texPosId = 0;
+    bool texWithUV = false;
+    bool hasHard = false;
+    // hard edges overlay
+    GLuint hardVao = 0, hardIdx = 0;
+    GLsizei hardCount = 0;
 };
 
 class Renderer : protected QOpenGLFunctions_4_1_Core {
@@ -85,7 +91,7 @@ private:
     void uploadDisplay(SceneObject& obj, GpuMesh& g);
     void uploadCage(Scene& scene, SceneObject& obj, GpuMesh& g, bool smooth);
     void uploadSelection(Scene& scene, SceneObject& obj, GpuMesh& g, bool smooth);
-    bool uploadTextured(SceneObject& obj, GpuMesh& g);
+    bool uploadSplit(SceneObject& obj, GpuMesh& g, bool withUV);
     static void deleteGpu(QOpenGLFunctions_4_1_Core* gl, GpuMesh& g);
 
     GLuint meshProg_ = 0, lineProg_ = 0, pickProg_ = 0, bgProg_ = 0;

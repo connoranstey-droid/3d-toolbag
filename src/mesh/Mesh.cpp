@@ -26,7 +26,7 @@ void Mesh::clear()
     uvs.clear();
     faceUVs.clear();
     heFace.clear(); heTwin.clear(); heEdge.clear();
-    edges.clear(); edgeCrease.clear();
+    edges.clear(); edgeCrease.clear(); edgeHard.clear();
     vertEdgeStart.clear(); vertEdges.clear();
     vertFaceStart.clear(); vertFaces.clear();
 }
@@ -122,9 +122,14 @@ void Mesh::buildTopology()
 {
     // Remember creases by vertex pair so edits that keep vertex ids keep creases.
     std::unordered_map<uint64_t, float> oldCreases;
+    std::unordered_map<uint64_t, uint8_t> oldHard;
     if (edgeCrease.size() == edges.size()) {
         for (size_t e = 0; e < edges.size(); ++e)
             if (edgeCrease[e] > 0.0f && edges[e].v0 != kInvalid) oldCreases[pairKey(edges[e].v0, edges[e].v1)] = edgeCrease[e];
+    }
+    if (edgeHard.size() == edges.size()) {
+        for (size_t e = 0; e < edges.size(); ++e)
+            if (edgeHard[e] && edges[e].v0 != kInvalid) oldHard[pairKey(edges[e].v0, edges[e].v1)] = 1;
     }
 
     const uint32_t V = numVerts();
@@ -195,6 +200,11 @@ void Mesh::buildTopology()
         for (uint32_t h = 0; h < H; ++h) vertFaces[fill[faceVerts[h]]++] = heFace[h];
     }
 
+    edgeHard.assign(E, 0);
+    if (!oldHard.empty()) {
+        for (uint32_t e = 0; e < E; ++e)
+            if (oldHard.count(pairKey(edges[e].v0, edges[e].v1))) edgeHard[e] = 1;
+    }
     edgeCrease.assign(E, 0.0f);
     if (!oldCreases.empty()) {
         for (uint32_t e = 0; e < E; ++e) {
@@ -282,6 +292,56 @@ uint64_t Mesh::triangleCount() const
     return t;
 }
 
+bool Mesh::hasHardEdges() const
+{
+    for (uint8_t h : edgeHard)
+        if (h) return true;
+    return false;
+}
+
+void Mesh::setHard(uint32_t a, uint32_t b, bool hard)
+{
+    uint32_t e = findEdge(a, b);
+    if (e == kInvalid) return;
+    if (edgeHard.size() != edges.size()) edgeHard.assign(edges.size(), 0);
+    edgeHard[e] = hard ? 1 : 0;
+}
+
+void Mesh::computeCornerNormals(std::vector<Vec3>& out, std::vector<uint32_t>* groupOut) const
+{
+    const uint32_t H = numHalfEdges();
+    std::vector<Vec3> fn;
+    computeFaceNormals(fn);
+    // Union corners across soft manifold edges (at both ends of the edge).
+    std::vector<uint32_t> parent(H);
+    for (uint32_t h = 0; h < H; ++h) parent[h] = h;
+    auto find = [&](uint32_t x) {
+        while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+    };
+    auto unite = [&](uint32_t a, uint32_t b) {
+        a = find(a); b = find(b);
+        if (a != b) parent[std::max(a, b)] = std::min(a, b);
+    };
+    const bool anyHard = hasHardEdges();
+    for (uint32_t e = 0; e < numEdges(); ++e) {
+        if (anyHard && edgeHard[e]) continue;
+        uint32_t h = edges[e].he, t = heTwin[h];
+        if (t == kInvalid) continue;
+        if (faceVerts[h] == faceVerts[heNext(t)]) unite(h, heNext(t));
+        if (faceVerts[heNext(h)] == faceVerts[t]) unite(heNext(h), t);
+    }
+    std::vector<Vec3> sum(H);
+    for (uint32_t h = 0; h < H; ++h) sum[find(h)] += fn[heFace[h]];
+    out.resize(H);
+    if (groupOut) groupOut->resize(H);
+    for (uint32_t h = 0; h < H; ++h) {
+        uint32_t r = find(h);
+        out[h] = normalize(sum[r]);
+        if (groupOut) (*groupOut)[h] = r;
+    }
+}
+
 bool Mesh::hasCreases() const
 {
     for (float c : edgeCrease)
@@ -339,14 +399,17 @@ void Mesh::append(const Mesh& other, const Mat4& xform)
         for (uint32_t v : other.faceVertices(f)) faceVerts.push_back(v + base);
         faceStart.push_back(static_cast<uint32_t>(faceVerts.size()));
     }
-    // Carry creases as stale edges so buildTopology() picks them up.
-    if (other.edgeCrease.size() == other.edges.size()) {
-        if (edgeCrease.size() != edges.size()) edgeCrease.assign(edges.size(), 0.0f);
-        for (uint32_t e = 0; e < other.numEdges(); ++e)
-            if (other.edgeCrease[e] > 0.0f) {
-                edges.push_back({other.edges[e].v0 + base, other.edges[e].v1 + base, kInvalid, 0});
-                edgeCrease.push_back(other.edgeCrease[e]);
-            }
+    // Carry creases and hard edges as stale edges so buildTopology() picks them up.
+    if (edgeCrease.size() != edges.size()) edgeCrease.resize(edges.size(), 0.0f);
+    if (edgeHard.size() != edges.size()) edgeHard.resize(edges.size(), 0);
+    for (uint32_t e = 0; e < other.numEdges(); ++e) {
+        float c = e < other.edgeCrease.size() ? other.edgeCrease[e] : 0.0f;
+        uint8_t h = e < other.edgeHard.size() ? other.edgeHard[e] : 0;
+        if (c > 0.0f || h) {
+            edges.push_back({other.edges[e].v0 + base, other.edges[e].v1 + base, kInvalid, 0});
+            edgeCrease.push_back(c);
+            edgeHard.push_back(h);
+        }
     }
 }
 

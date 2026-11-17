@@ -449,6 +449,66 @@ static void testBVH()
     CHECK(c2.hit && std::abs(length(c2.point) - 2.0f) < 0.02f);
 }
 
+static void testHardEdges()
+{
+    Mesh c = prim::cube();
+    uint32_t hard = 0;
+    for (uint32_t e = 0; e < c.numEdges(); ++e) hard += c.isHard(e);
+    CHECK_EQ(hard, 12u); // Maya cube: all edges hard
+    std::vector<Vec3> cn;
+    std::vector<uint32_t> grp;
+    c.computeCornerNormals(cn, &grp);
+    std::sort(grp.begin(), grp.end());
+    grp.erase(std::unique(grp.begin(), grp.end()), grp.end());
+    CHECK_EQ(grp.size(), size_t(24)); // 8 vertices x 3 normals
+    bool flat = true;
+    for (uint32_t h = 0; h < c.numHalfEdges(); ++h) flat &= dot(cn[h], c.faceNormal(c.heFace[h])) > 0.999f;
+    CHECK(flat);
+    // Soft sphere: one normal per vertex.
+    Mesh s = prim::sphere(1, 12, 8);
+    CHECK(!s.hasHardEdges());
+    s.computeCornerNormals(cn, &grp);
+    std::sort(grp.begin(), grp.end());
+    grp.erase(std::unique(grp.begin(), grp.end()), grp.end());
+    CHECK_EQ(grp.size(), size_t(s.numVerts()));
+    // Cylinder: cap rings hard, sides soft.
+    Mesh cy = prim::cylinder(1, 2, 16, 1, true);
+    hard = 0;
+    for (uint32_t e = 0; e < cy.numEdges(); ++e) hard += cy.isHard(e);
+    CHECK_EQ(hard, 32u);
+    // Hardness survives topology ops.
+    auto plan = ops::planEdgeLoop(c, 0, 0.5f);
+    ops::insertEdgeLoop(c, plan);
+    hard = 0;
+    for (uint32_t e = 0; e < c.numEdges(); ++e) hard += c.isHard(e);
+    CHECK_EQ(hard, 16u); // 4 split edges -> 8 halves, plus the 8 untouched, new loop soft
+    Mesh mc = prim::cube();
+    ops::extrudeFaces(mc, {0}, true, 0.2f);
+    ops::mirror(mc, 0, 1e-4f);
+    CHECK(mc.hasHardEdges());
+    // Normal angle: soften all, then 30 degrees hardens the cube again.
+    Mesh n = prim::cube();
+    ops::setEdgesHard(n, {}, false);
+    CHECK(!n.hasHardEdges());
+    ops::setNormalAngle(n, {}, 30.0f);
+    hard = 0;
+    for (uint32_t e = 0; e < n.numEdges(); ++e) hard += n.isHard(e);
+    CHECK_EQ(hard, 12u);
+    // Bevel: rounded bevel strips soft inside, hard boundary only where sharper than 30 deg.
+    Mesh b = prim::cube();
+    IndexList all;
+    for (uint32_t e = 0; e < b.numEdges(); ++e) all.push_back(e);
+    ops::bevelEdges(b, all, {0.1f, 4, true});
+    hard = 0;
+    for (uint32_t e = 0; e < b.numEdges(); ++e) hard += b.isHard(e);
+    CHECK_EQ(hard, 0u); // 4 segments of a 90 deg turn = 18 deg steps: all soft
+    Mesh b1 = prim::cube();
+    ops::bevelEdges(b1, all, {0.1f, 1, false});
+    hard = 0;
+    for (uint32_t e = 0; e < b1.numEdges(); ++e) hard += b1.isHard(e);
+    CHECK(hard > 0); // single chamfer: 45 deg turns -> hard
+}
+
 static void testPerformance()
 {
     // A dense cage: ~100k quads to 1.6M quads at level 2.
@@ -476,7 +536,7 @@ int main()
         {"loops", testLoops}, {"delete/merge", testDeleteMerge}, {"mirror/separate", testMirrorSeparate},
         {"convert/grow", testConvertGrow}, {"obj", testObj}, {"uvs through ops", testUVsThroughOps},
         {"bevel", testBevel}, {"bridge/multicut/weld", testBridgeCut},
-        {"uv tools", testUVTools}, {"bvh", testBVH}, {"performance", testPerformance}};
+        {"uv tools", testUVTools}, {"hard edges", testHardEdges}, {"bvh", testBVH}, {"performance", testPerformance}};
     for (auto& [name, fn] : tests) {
         int before = g_fail;
         fn();

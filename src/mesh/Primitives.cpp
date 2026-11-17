@@ -1,4 +1,5 @@
 #include "mesh/Primitives.h"
+#include "mesh/MeshOps.h"
 
 #include <cmath>
 #include <unordered_map>
@@ -53,11 +54,13 @@ static void addGrid(Mesh& m, Vec3 origin, Vec3 u, Vec3 v, int su, int sv, Vec2 u
         }
 }
 
-static void finish(Mesh& m)
+static void finish(Mesh& m, bool hardCorners = false)
 {
     m.weldUVs(1e-5f);
     m.buildTopology();
     m.touchUVs();
+    // Maya-style default normals: box edges and cylinder/cone caps are hard, curved surfaces soft.
+    if (hardCorners) ops::setNormalAngle(m, {}, 60.0f);
 }
 
 Mesh cube(float w, float h, float d, int sx, int sy, int sz)
@@ -74,7 +77,7 @@ Mesh cube(float w, float h, float d, int sx, int sy, int sz)
     addGrid(m, {x, -y, z}, {0, 0, -d}, {0, h, 0}, sz, sy, {0.625f, 0.0f}, {b, q});   // +X right
     addGrid(m, {-x, -y, -z}, {0, 0, d}, {0, h, 0}, sz, sy, {0.125f, 0.0f}, {b, q});  // -X left
     weld(m, 1e-5f * std::max({w, h, d}));
-    finish(m);
+    finish(m, true);
     return m;
 }
 
@@ -158,7 +161,7 @@ Mesh cylinder(float r, float height, int sa, int sh, bool caps)
         m.addFaceWithUVs(topCap, topUV);
         m.addFaceWithUVs(botCap, botUV);
     }
-    finish(m);
+    finish(m, true);
     return m;
 }
 
@@ -195,7 +198,7 @@ Mesh cone(float r, float height, int sa, int sh)
         capT.push_back(capUV({0.25f, 0.25f}, 0.24f, 2 * kPi * i / sa, true));
     }
     m.addFaceWithUVs(cap, capT);
-    finish(m);
+    finish(m, true);
     return m;
 }
 

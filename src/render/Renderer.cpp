@@ -190,10 +190,10 @@ bool Renderer::initialize()
 
 void Renderer::deleteGpu(QOpenGLFunctions_4_1_Core* gl, GpuMesh& g)
 {
-    GLuint vaos[] = {g.vao, g.dWireVao, g.cVao, g.selEdgeVao, g.selTriVao, g.texVao};
-    GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris, g.texPos, g.texNrm, g.texUV, g.texIdx};
-    gl->glDeleteVertexArrays(6, vaos);
-    gl->glDeleteBuffers(13, bufs);
+    GLuint vaos[] = {g.vao, g.dWireVao, g.cVao, g.selEdgeVao, g.selTriVao, g.texVao, g.hardVao};
+    GLuint bufs[] = {g.pos, g.nrm, g.tri, g.dWire, g.cPos, g.cWeight, g.cEdges, g.selEdges, g.selTris, g.texPos, g.texNrm, g.texUV, g.texIdx, g.hardIdx};
+    gl->glDeleteVertexArrays(7, vaos);
+    gl->glDeleteBuffers(14, bufs);
 }
 
 void Renderer::cleanup()
@@ -238,8 +238,9 @@ void Renderer::syncObject(Scene& scene, SceneObject& obj)
         glGenVertexArrays(1, &g.selEdgeVao);
         glGenVertexArrays(1, &g.selTriVao);
         GLuint* bufs[] = {&g.pos, &g.nrm, &g.tri, &g.dWire, &g.cPos, &g.cWeight, &g.cEdges, &g.selEdges, &g.selTris,
-                          &g.texPos, &g.texNrm, &g.texUV, &g.texIdx};
+                          &g.texPos, &g.texNrm, &g.texUV, &g.texIdx, &g.hardIdx};
         for (GLuint* b : bufs) glGenBuffers(1, b);
+        glGenVertexArrays(1, &g.hardVao);
         glGenVertexArrays(1, &g.texVao);
         glBindVertexArray(g.texVao);
         GLuint texBufs[3] = {g.texPos, g.texNrm, g.texUV};
@@ -310,6 +311,15 @@ void Renderer::uploadDisplay(SceneObject& obj, GpuMesh& g)
         g.dTopo = d.topologyId;
         g.dPos = 0;
         g.selKey = 0;
+        g.hasHard = d.hasHardEdges();
+        // Hard edges of the cage (for the "show hard edges" overlay).
+        const Mesh& c = obj.mesh();
+        std::vector<uint32_t> he;
+        for (uint32_t e = 0; e < c.numEdges(); ++e)
+            if (c.isHard(e)) he.insert(he.end(), {c.edges[e].v0, c.edges[e].v1});
+        glBindBuffer(GL_ARRAY_BUFFER, g.hardIdx);
+        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(he.size() * 4), he.data(), GL_STATIC_DRAW);
+        g.hardCount = GLsizei(he.size());
     }
     if (g.dPos != d.positionId) {
         std::vector<Vec3>& n = g.normals;
@@ -322,29 +332,35 @@ void Renderer::uploadDisplay(SceneObject& obj, GpuMesh& g)
     }
 }
 
-bool Renderer::uploadTextured(SceneObject& obj, GpuMesh& g)
+bool Renderer::uploadSplit(SceneObject& obj, GpuMesh& g, bool withUV)
 {
     const Mesh& d = obj.displayMesh();
-    if (!d.hasUVs()) return false;
-    if (g.texTopo != d.topologyId || g.texUvId != d.uvId) {
-        // Split vertices where corners use different uvs.
+    if (withUV && !d.hasUVs()) withUV = false;
+    if (g.texTopo != d.topologyId || (withUV && g.texUvId != d.uvId) || g.texWithUV != withUV) {
+        // One GPU vertex per (smoothing group, uv) pair.
+        std::vector<Vec3> cn;
+        std::vector<uint32_t> group;
+        d.computeCornerNormals(cn, &group);
         std::unordered_map<uint64_t, uint32_t> split;
         split.reserve(d.numHalfEdges());
         g.texSrc.clear();
         std::vector<Vec2> uvs;
         std::vector<uint32_t> cornerIdx(d.numHalfEdges());
         for (uint32_t h = 0; h < d.numHalfEdges(); ++h) {
-            uint64_t key = (uint64_t(d.faceVerts[h]) << 32) | d.faceUVs[h];
+            uint64_t key = (uint64_t(group[h]) << 32) | (withUV ? d.faceUVs[h] : 0u);
             auto [it, ins] = split.emplace(key, uint32_t(g.texSrc.size()));
-            if (ins) { g.texSrc.push_back(d.faceVerts[h]); uvs.push_back(d.cornerUV(h)); }
+            if (ins) {
+                g.texSrc.push_back(h);
+                uvs.push_back(withUV ? d.cornerUV(h) : Vec2{});
+            }
             cornerIdx[h] = it->second;
         }
         std::vector<uint32_t> idx;
         idx.reserve(d.triangleCount() * 3);
         for (uint32_t f = 0; f < d.numFaces(); ++f)
             for (uint32_t i = 1; i + 1 < d.faceSize(f); ++i) {
-                uint32_t b = d.faceStart[f];
-                idx.insert(idx.end(), {cornerIdx[b], cornerIdx[b + i], cornerIdx[b + i + 1]});
+                uint32_t b0 = d.faceStart[f];
+                idx.insert(idx.end(), {cornerIdx[b0], cornerIdx[b0 + i], cornerIdx[b0 + i + 1]});
             }
         glBindBuffer(GL_ARRAY_BUFFER, g.texUV);
         glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(uvs.size() * sizeof(Vec2)), uvs.data(), GL_STATIC_DRAW);
@@ -353,11 +369,17 @@ bool Renderer::uploadTextured(SceneObject& obj, GpuMesh& g)
         g.texIndexCount = GLsizei(idx.size());
         g.texTopo = d.topologyId;
         g.texUvId = d.uvId;
+        g.texWithUV = withUV;
         g.texPosId = 0;
     }
-    if (g.texPosId != d.positionId && g.normals.size() == d.numVerts()) {
+    if (g.texPosId != d.positionId) {
+        std::vector<Vec3> cn;
+        d.computeCornerNormals(cn);
         std::vector<Vec3> p(g.texSrc.size()), n(g.texSrc.size());
-        for (size_t i = 0; i < g.texSrc.size(); ++i) { p[i] = d.positions[g.texSrc[i]]; n[i] = g.normals[g.texSrc[i]]; }
+        for (size_t i = 0; i < g.texSrc.size(); ++i) {
+            p[i] = d.positions[d.faceVerts[g.texSrc[i]]];
+            n[i] = cn[g.texSrc[i]];
+        }
         glBindBuffer(GL_ARRAY_BUFFER, g.texPos);
         glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(p.size() * sizeof(Vec3)), p.data(), GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, g.texNrm);
@@ -374,6 +396,11 @@ void Renderer::uploadCage(Scene& scene, SceneObject& obj, GpuMesh& g, bool smoot
     const bool shared = !smooth;
     if (shared != g.cageShared || !g.cageVaoReady) {
         GLuint posBuf = shared ? g.pos : g.cPos;
+        glBindVertexArray(g.hardVao);
+        glBindBuffer(GL_ARRAY_BUFFER, posBuf);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3), nullptr);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.hardIdx);
         for (GLuint vao : {g.cVao, g.selEdgeVao}) {
             glBindVertexArray(vao);
             glBindBuffer(GL_ARRAY_BUFFER, posBuf);
@@ -553,8 +580,9 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
                 glUniform3f(uColor, 0.58f, 0.59f, 0.60f);
                 glPolygonOffset(1.0f, 1.0f);
             }
-            if (opt.textured && !live && uploadTextured(*o, *g)) {
-                glUniform1i(uChecker, 1);
+            const bool tex = opt.textured && !live && o->displayMesh().hasUVs();
+            if ((tex || g->hasHard) && uploadSplit(*o, *g, tex)) {
+                glUniform1i(uChecker, tex ? 1 : 0);
                 glBindVertexArray(g->texVao);
                 glDrawElements(GL_TRIANGLES, g->texIndexCount, GL_UNSIGNED_INT, nullptr);
                 glUniform1i(uChecker, 0);
@@ -610,6 +638,12 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
             glBindVertexArray(g->cVao);
             glDrawElements(GL_LINES, g->cEdgeCount, GL_UNSIGNED_INT, nullptr);
             glUniform1i(lMode, 0);
+        }
+        if (opt.showHardEdges && g->hardCount) {
+            glUniform1i(lMode, 0);
+            glUniform4f(lColor, 0.1f, 0.95f, 1.0f, 1.0f);
+            glBindVertexArray(g->hardVao);
+            glDrawElements(GL_LINES, g->hardCount, GL_UNSIGNED_INT, nullptr);
         }
         if (!hilite) continue;
 

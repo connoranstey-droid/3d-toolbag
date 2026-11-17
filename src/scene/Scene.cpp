@@ -529,6 +529,14 @@ bool Scene::save(const QString& path, QString* error) const
         for (uint32_t e = 0; e < m.numEdges(); ++e)
             if (m.edgeCrease[e] > 0) creases.append(QJsonArray{double(m.edges[e].v0), double(m.edges[e].v1), m.edgeCrease[e]});
         j["creases"] = creases;
+        QJsonArray hard;
+        for (uint32_t e = 0; e < m.numEdges(); ++e)
+            if (m.isHard(e)) hard.append(QJsonArray{double(m.edges[e].v0), double(m.edges[e].v1)});
+        j["hardEdges"] = hard;
+        if (m.hasUVs()) {
+            j["uvs"] = encode(m.uvs);
+            j["faceUVs"] = encode(m.faceUVs);
+        }
         objs.append(j);
     }
     QJsonObject root;
@@ -590,6 +598,17 @@ bool Scene::load(const QString& path, QString* error)
         for (const QJsonValue& c : j["creases"].toArray()) {
             QJsonArray a = c.toArray();
             m->setCrease(uint32_t(a[0].toDouble()), uint32_t(a[1].toDouble()), float(a[2].toDouble()));
+        }
+        for (const QJsonValue& h : j["hardEdges"].toArray())
+            m->setHard(uint32_t(h.toArray()[0].toDouble()), uint32_t(h.toArray()[1].toDouble()), true);
+        if (j.contains("uvs")) {
+            std::vector<Vec2> uvs;
+            std::vector<uint32_t> fuv;
+            if (decode(j["uvs"], uvs) && decode(j["faceUVs"], fuv) && fuv.size() == m->faceVerts.size()) {
+                bool ok = true;
+                for (uint32_t u : fuv) ok &= u < uvs.size();
+                if (ok) { m->uvs = std::move(uvs); m->faceUVs = std::move(fuv); m->touchUVs(); }
+            }
         }
         o->st.mesh = m;
         loaded.push_back(std::move(o));

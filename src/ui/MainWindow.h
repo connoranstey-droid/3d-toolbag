@@ -45,6 +45,12 @@ private:
     bool saveScene(bool saveAs);
     void showHotkeys();
     void bevelOptions();
+    void buildPluginMenus();
+    bool pluginOptionsDialog(const struct PluginCommand& c);
+    void showPluginManager();
+public:
+    class PluginManager* pluginManager() { return plugins_; }
+private:
 
     Scene* scene_;
     Viewport* viewport_;
@@ -64,9 +70,11 @@ private:
     int bevelSegments_ = 1;
     bool bevelRound_ = true;
     int bridgeDivisions_ = 0;
+    float normalAngle_ = 30.0f;
     class QDockWidget* uvDock_ = nullptr;
     class UVEditor* uvEditor_ = nullptr;
     QAction* checkerAct_ = nullptr;
+    class PluginManager* plugins_ = nullptr;
     QAction* softAct_ = nullptr;
     QString helpText_;
 };

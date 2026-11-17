@@ -100,9 +100,29 @@ IndexList bevelEdges(Mesh& m, const IndexList& edgeList, const BevelOptions& opt
             cornerPt[h] = v;
             cornerUVv[h] = cuv(h);
         } else if (bo && bi) {
-            float a = std::min(d / sinT, lo * 0.48f), b = std::min(d / sinT, li * 0.48f);
-            cornerPt[h] = m.addVertex(P[v] + uo * a + ui * b);
-            cornerUVv[h] = cuv(h) + (cuv(hn) - cuv(h)) * (a / lo) + (cuv(hp) - cuv(h)) * (b / li);
+            // Point at distance d from both bevelled edges, inside the face.
+            const float cosT = dot(uo, ui);
+            const float rawSin = length(cross(uo, ui));
+            Vec3 np;
+            float a, b;
+            if (rawSin < 0.2f && cosT < 0) {
+                // Nearly collinear edges: offset straight into the face.
+                Vec3 fn = m.faceNormal(m.heFace[h]);
+                Vec3 inward = normalize(cross(fn, uo));
+                np = P[v] + inward * std::min(d, 0.48f * std::min(lo, li));
+                a = dot(np - P[v], uo);
+                b = dot(np - P[v], ui);
+            } else {
+                // p = v + t (uo + ui), t = d / sin(theta). The travel along each edge is t (1 + cos theta);
+                // clamp that (not t itself) so near-straight corners keep their full inset.
+                float t = d / sinT;
+                const float travel = std::max(1e-6f, 1.0f + cosT);
+                t = std::min({t, lo * 0.48f / travel, li * 0.48f / travel});
+                a = b = t;
+                np = P[v] + (uo + ui) * t;
+            }
+            cornerPt[h] = m.addVertex(np);
+            cornerUVv[h] = cuv(h) + (cuv(hn) - cuv(h)) * (std::max(a, 0.0f) / lo) + (cuv(hp) - cuv(h)) * (std::max(b, 0.0f) / li);
         } else {
             // Slide along the single non-bevelled edge of this corner.
             const uint32_t se = bo ? ein : eout;
@@ -295,6 +315,25 @@ IndexList bevelEdges(Mesh& m, const IndexList& edgeList, const BevelOptions& opt
     m.removeUnusedVertices();
     if (uv) m.weldUVs(1e-5f);
     m.buildTopology();
+    // Like Maya's polyBevel smoothing angle: edges sharper than 30 degrees go hard. For rounded
+    // multi-segment bevels the whole bevel surface (strips + corner patches) shades smoothly and only
+    // its boundary with the original faces may be hard.
+    {
+        std::vector<uint8_t> isNew(m.numFaces(), 0);
+        for (uint32_t f : created) isNew[f] = 1;
+        const bool rounded = opt.round && segs > 1;
+        const float cosLimit = std::cos(radians(30.0f));
+        if (m.edgeHard.size() != m.edges.size()) m.edgeHard.assign(m.edges.size(), 0);
+        for (uint32_t f : created)
+            for (uint32_t h = m.faceStart[f]; h < m.faceStart[f + 1]; ++h) {
+                uint32_t e = m.heEdge[h], t = m.heTwin[h];
+                if (t == kInvalid) continue;
+                const uint32_t g = m.heFace[t];
+                const bool sharp = dot(m.faceNormal(f), m.faceNormal(g)) < cosLimit;
+                m.edgeHard[e] = sharp && (!rounded || !isNew[g]) ? 1 : 0;
+            }
+        m.topologyId = nextVersionId();
+    }
     return created;
 }
 
@@ -473,8 +512,10 @@ uint32_t splitEdge(Mesh& m, uint32_t a, uint32_t b, float t)
     m.faceVerts = std::move(verts);
     if (uv) { m.faceUVs = std::move(uvi); m.weldUVs(); }
     float crease = m.edgeCrease.size() == m.edges.size() ? m.edgeCrease[e] : 0.0f;
+    bool hard = m.isHard(e);
     m.buildTopology();
     if (crease > 0) { m.setCrease(a, nv, crease); m.setCrease(nv, b, crease); }
+    if (hard) { m.setHard(a, nv, true); m.setHard(nv, b, true); }
     return nv;
 }
 

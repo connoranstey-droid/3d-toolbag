@@ -5,6 +5,8 @@
 #include <cmath>
 #include <numeric>
 #include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
 
 namespace facet::uv {
 
@@ -272,25 +274,6 @@ struct Sparse { // row-major list of rows with 6 entries (3 complex coefficients
     std::vector<float> rhs;
 };
 
-void mulA(const Sparse& A, const std::vector<float>& x, std::vector<float>& y)
-{
-    const size_t rows = A.rowStart.size() - 1;
-    y.assign(rows, 0.0f);
-    parallelFor(rows, [&](size_t r) {
-        float s = 0;
-        for (uint32_t k = A.rowStart[r]; k < A.rowStart[r + 1]; ++k) s += A.val[k] * x[A.col[k]];
-        y[r] = s;
-    }, 4096);
-}
-
-void mulAt(const Sparse& A, const std::vector<float>& y, std::vector<float>& x, size_t n)
-{
-    x.assign(n, 0.0f);
-    const size_t rows = A.rowStart.size() - 1;
-    for (size_t r = 0; r < rows; ++r)
-        for (uint32_t k = A.rowStart[r]; k < A.rowStart[r + 1]; ++k) x[A.col[k]] += A.val[k] * y[r];
-}
-
 } // namespace
 
 int unfold(Mesh& m, const IndexList& uvSel, int maxIterations)
@@ -384,11 +367,94 @@ int unfold(Mesh& m, const IndexList& uvSel, int maxIterations)
         const size_t N = size_t(nf) * 2;
         if (N == 0 || A.rhs.empty()) continue;
 
-        // Preconditioned CG on A^T A x = A^T b.
-        std::vector<float> diag(N, 0.0f);
-        for (size_t k = 0; k < A.col.size(); ++k) diag[A.col[k]] += A.val[k] * A.val[k];
-        for (float& d : diag) d = d > 1e-20f ? 1.0f / d : 1.0f;
-        std::vector<float> x(N, 0.0f), r, z, p, Ap, tmp;
+        // Assemble the normal matrix N = A^T A (symmetric, sparse) and solve N x = A^T b with
+        // conjugate gradients preconditioned by an incomplete Cholesky factorisation IC(0).
+        const size_t rows = A.rowStart.size() - 1;
+        std::vector<std::vector<std::pair<uint32_t, float>>> acc(N);
+        for (size_t r = 0; r < rows; ++r)
+            for (uint32_t a = A.rowStart[r]; a < A.rowStart[r + 1]; ++a)
+                for (uint32_t b = A.rowStart[r]; b < A.rowStart[r + 1]; ++b) acc[A.col[a]].push_back({A.col[b], A.val[a] * A.val[b]});
+        std::vector<uint32_t> nStart(N + 1, 0), nCol;
+        std::vector<double> nVal;
+        for (size_t i = 0; i < N; ++i) {
+            auto& row = acc[i];
+            std::sort(row.begin(), row.end(), [](auto& x, auto& y) { return x.first < y.first; });
+            for (size_t k = 0; k < row.size();) {
+                uint32_t c = row[k].first;
+                double v = 0;
+                while (k < row.size() && row[k].first == c) v += row[k++].second;
+                nCol.push_back(c);
+                nVal.push_back(v);
+            }
+            nStart[i + 1] = uint32_t(nCol.size());
+            std::vector<std::pair<uint32_t, float>>().swap(row);
+        }
+        auto mulN = [&](const std::vector<double>& in, std::vector<double>& outv) {
+            outv.resize(N);
+            parallelFor(N, [&](size_t i) {
+                double sum = 0;
+                for (uint32_t k = nStart[i]; k < nStart[i + 1]; ++k) sum += nVal[k] * in[nCol[k]];
+                outv[i] = sum;
+            }, 2048);
+        };
+        // IC(0): L has the sparsity of the lower triangle of N (stored by rows, diagonal last).
+        std::vector<uint32_t> lStart(N + 1, 0), lCol;
+        std::vector<double> lVal;
+        for (size_t i = 0; i < N; ++i) {
+            for (uint32_t k = nStart[i]; k < nStart[i + 1]; ++k)
+                if (nCol[k] <= i) { lCol.push_back(nCol[k]); lVal.push_back(nVal[k]); }
+            lStart[i + 1] = uint32_t(lCol.size());
+        }
+        const std::vector<double> lOrig = lVal;
+        auto factor = [&](double shift) {
+            lVal = lOrig;
+            for (size_t i = 0; i < N; ++i) {
+                const uint32_t bi = lStart[i], ei = lStart[i + 1]; // last entry is the diagonal
+                for (uint32_t a = bi; a + 1 < ei; ++a) {
+                    const uint32_t k = lCol[a];
+                    // dot(L[i, :k], L[k, :k]) via merge of sorted rows
+                    double dotv = 0;
+                    uint32_t p = bi, q = lStart[k];
+                    const uint32_t qe = lStart[k + 1] - 1; // exclude diagonal of row k
+                    while (p < a && q < qe) {
+                        if (lCol[p] == lCol[q]) dotv += lVal[p++] * lVal[q++];
+                        else if (lCol[p] < lCol[q]) ++p;
+                        else ++q;
+                    }
+                    lVal[a] = (lVal[a] - dotv) / lVal[lStart[k + 1] - 1];
+                }
+                double d = lVal[ei - 1] * (1.0 + shift);
+                for (uint32_t a = bi; a + 1 < ei; ++a) d -= lVal[a] * lVal[a];
+                if (!(d > 1e-300)) return false;
+                lVal[ei - 1] = std::sqrt(d);
+            }
+            return true;
+        };
+        bool haveIC = false;
+        for (double shift : {0.0, 1e-4, 1e-3, 1e-2, 1e-1})
+            if (factor(shift)) { haveIC = true; break; }
+        std::vector<double> diagInv(N, 1.0);
+        for (size_t i = 0; i < N; ++i)
+            for (uint32_t k = nStart[i]; k < nStart[i + 1]; ++k)
+                if (nCol[k] == i && nVal[k] > 1e-30) diagInv[i] = 1.0 / nVal[k];
+        auto precond = [&](const std::vector<double>& r, std::vector<double>& z) {
+            z = r;
+            if (!haveIC) {
+                for (size_t i = 0; i < N; ++i) z[i] *= diagInv[i];
+                return;
+            }
+            for (size_t i = 0; i < N; ++i) { // forward: L y = r
+                double v = z[i];
+                for (uint32_t a = lStart[i]; a + 1 < lStart[i + 1]; ++a) v -= lVal[a] * z[lCol[a]];
+                z[i] = v / lVal[lStart[i + 1] - 1];
+            }
+            for (size_t i = N; i-- > 0;) { // backward: L^T x = y
+                z[i] /= lVal[lStart[i + 1] - 1];
+                for (uint32_t a = lStart[i]; a + 1 < lStart[i + 1]; ++a) z[lCol[a]] -= lVal[a] * z[i];
+            }
+        };
+
+        std::vector<double> x(N, 0.0);
         // Warm start from a planar projection relative to the pins.
         {
             Vec3 a3 = m.positions[vertOf[p0]], b3 = m.positions[vertOf[p1]];
@@ -402,30 +468,32 @@ int unfold(Mesh& m, const IndexList& uvSel, int maxIterations)
                     x[size_t(freeIdx[i]) * 2 + 1] = dot(d, ey);
                 }
         }
-        std::vector<float> b;
-        mulAt(A, A.rhs, b, N);
-        mulA(A, x, tmp);
-        mulAt(A, tmp, r, N);
-        for (size_t i = 0; i < N; ++i) r[i] = b[i] - r[i];
-        z.resize(N);
-        for (size_t i = 0; i < N; ++i) z[i] = r[i] * diag[i];
-        p = z;
-        double rz = 0, bnorm = 0;
-        for (size_t i = 0; i < N; ++i) { rz += double(r[i]) * z[i]; bnorm += double(b[i]) * b[i]; }
+        std::vector<double> b(N, 0.0);
+        for (size_t r = 0; r < rows; ++r)
+            for (uint32_t k = A.rowStart[r]; k < A.rowStart[r + 1]; ++k) b[A.col[k]] += double(A.val[k]) * A.rhs[r];
+        std::vector<double> r(N), z, p, Ap;
+        mulN(x, Ap);
+        double bnorm = 0;
+        for (size_t i = 0; i < N; ++i) { r[i] = b[i] - Ap[i]; bnorm += b[i] * b[i]; }
         bnorm = std::max(bnorm, 1e-30);
-        for (int it = 0; it < maxIterations; ++it) {
-            mulA(A, p, tmp);
-            mulAt(A, tmp, Ap, N);
+        precond(r, z);
+        p = z;
+        double rz = 0;
+        for (size_t i = 0; i < N; ++i) rz += r[i] * z[i];
+        int it = 0;
+        for (; it < maxIterations; ++it) {
+            mulN(p, Ap);
             double pAp = 0;
-            for (size_t i = 0; i < N; ++i) pAp += double(p[i]) * Ap[i];
-            if (std::abs(pAp) < 1e-30) break;
-            float alpha = float(rz / pAp);
+            for (size_t i = 0; i < N; ++i) pAp += p[i] * Ap[i];
+            if (std::abs(pAp) < 1e-300) break;
+            const double alpha = rz / pAp;
             double rr = 0;
-            for (size_t i = 0; i < N; ++i) { x[i] += alpha * p[i]; r[i] -= alpha * Ap[i]; rr += double(r[i]) * r[i]; }
-            if (rr / bnorm < 1e-12) break;
+            for (size_t i = 0; i < N; ++i) { x[i] += alpha * p[i]; r[i] -= alpha * Ap[i]; rr += r[i] * r[i]; }
+            if (rr / bnorm < 1e-11) break;
+            precond(r, z);
             double rzNew = 0;
-            for (size_t i = 0; i < N; ++i) { z[i] = r[i] * diag[i]; rzNew += double(r[i]) * z[i]; }
-            float beta = float(rzNew / rz);
+            for (size_t i = 0; i < N; ++i) rzNew += r[i] * z[i];
+            const double beta = rzNew / rz;
             rz = rzNew;
             for (size_t i = 0; i < N; ++i) p[i] = z[i] + beta * p[i];
         }
@@ -436,7 +504,7 @@ int unfold(Mesh& m, const IndexList& uvSel, int maxIterations)
         oldC = oldC / float(n);
         std::vector<Vec2> res(n);
         for (uint32_t i = 0; i < n; ++i)
-            res[i] = i == p0 ? pin0 : i == p1 ? pin1 : Vec2{x[size_t(freeIdx[i]) * 2], x[size_t(freeIdx[i]) * 2 + 1]};
+            res[i] = i == p0 ? pin0 : i == p1 ? pin1 : Vec2{float(x[size_t(freeIdx[i]) * 2]), float(x[size_t(freeIdx[i]) * 2 + 1])};
         float a2 = 0;
         for (uint32_t f : shellFaces[s])
             for (uint32_t i = 1; i + 1 < m.faceSize(f); ++i) {
@@ -585,6 +653,97 @@ void rotate(Mesh& m, const IndexList& uvSelIn, float degrees)
         m.uvs[u] = c + Vec2{cs * d.x - sn * d.y, sn * d.x + cs * d.y};
     }
     m.touchUVs();
+}
+
+Quality measure(const Mesh& m, const Mat4& world, const IndexList& facesIn)
+{
+    Quality q;
+    if (!m.hasUVs()) return q;
+    IndexList faces = allFaces(m, facesIn);
+    auto ids = shellIds(m);
+    std::unordered_map<uint32_t, std::pair<double, double>> shellArea; // shell -> (a3, a2)
+    double A3 = 0, A2 = 0;
+    struct Tri { float a3, a2, ratio; };
+    std::vector<Tri> tris;
+    tris.reserve(faces.size() * 2);
+    for (uint32_t f : faces) {
+        const uint32_t b = m.faceStart[f];
+        float fa2 = 0;
+        for (uint32_t i = 1; i + 1 < m.faceSize(f); ++i) {
+            const uint32_t c[3] = {b, b + i, b + i + 1};
+            Vec3 P[3];
+            Vec2 U[3];
+            for (int k = 0; k < 3; ++k) { P[k] = world.transformPoint(m.positions[m.faceVerts[c[k]]]); U[k] = m.cornerUV(c[k]); }
+            Vec3 e1 = P[1] - P[0], e2 = P[2] - P[0];
+            float a3 = 0.5f * length(cross(e1, e2));
+            float a2 = 0.5f * cross2(U[1] - U[0], U[2] - U[0]);
+            fa2 += a2;
+            if (a3 < 1e-20f) continue;
+            // Jacobian of the 3D->uv map in the triangle's own 2D frame.
+            float l = length(e1);
+            Vec3 ex = e1 / l, ey = normalize(cross(normalize(cross(e1, e2)), ex));
+            float x2 = l, x3 = dot(e2, ex), y3 = dot(e2, ey);
+            Vec2 du1 = U[1] - U[0], du2 = U[2] - U[0];
+            // J * [x2 x3; 0 y3] = [du1 du2]
+            float j00 = du1.x / x2, j10 = du1.y / x2;
+            float j01 = (du2.x - j00 * x3) / y3, j11 = (du2.y - j10 * x3) / y3;
+            float a = j00 * j00 + j10 * j10, c2 = j01 * j01 + j11 * j11, bb = j00 * j01 + j10 * j11;
+            float tr = a + c2, det = std::sqrt(std::max(0.0f, (a - c2) * (a - c2) + 4 * bb * bb));
+            float s1 = std::sqrt(std::max(0.0f, (tr + det) * 0.5f)), s2 = std::sqrt(std::max(0.0f, (tr - det) * 0.5f));
+            tris.push_back({a3, std::abs(a2), s2 > 1e-20f ? s1 / s2 : 1e6f});
+            A3 += a3;
+            A2 += std::abs(a2);
+            auto& sa = shellArea[ids[m.faceUVs[b]]];
+            sa.first += a3;
+            sa.second += std::abs(a2);
+        }
+        if (fa2 < 0) ++q.flippedFaces;
+    }
+    q.shells = uint32_t(shellArea.size());
+    if (A3 <= 0 || A2 <= 0) return q;
+    double ad = 0, ang = 0;
+    const double norm = A2 / A3;
+    for (const Tri& t : tris) {
+        double s = (t.a2 / t.a3) / norm;
+        ad += t.a3 * std::max(s, s > 1e-12 ? 1.0 / s : 1e6);
+        ang += t.a3 * std::min(double(t.ratio), 1e3);
+    }
+    q.areaDistortion = float(ad / A3);
+    q.angleDistortion = float(ang / A3);
+    // Texel density spread between shells.
+    double mean = 0, var = 0;
+    for (auto& [id, sa] : shellArea) mean += sa.first * std::sqrt(sa.second / std::max(sa.first, 1e-30));
+    mean /= A3;
+    for (auto& [id, sa] : shellArea) {
+        double d = std::sqrt(sa.second / std::max(sa.first, 1e-30)) - mean;
+        var += sa.first * d * d;
+    }
+    q.densitySpread = mean > 0 ? float(std::sqrt(var / A3) / mean) : 0.0f;
+    // Coverage / overlap on a 512^2 raster of the 0..1 tile (texel centres).
+    const int R = 512;
+    std::vector<uint16_t> cover(size_t(R) * R, 0);
+    for (uint32_t f : faces) {
+        const uint32_t b = m.faceStart[f];
+        for (uint32_t i = 1; i + 1 < m.faceSize(f); ++i) {
+            Vec2 a = m.cornerUV(b) * float(R), c = m.cornerUV(b + i) * float(R), d = m.cornerUV(b + i + 1) * float(R);
+            float area = cross2(c - a, d - a);
+            if (std::abs(area) < 1e-12f) continue;
+            int x0 = std::max(0, int(std::floor(std::min({a.x, c.x, d.x})))), x1 = std::min(R - 1, int(std::ceil(std::max({a.x, c.x, d.x}))));
+            int y0 = std::max(0, int(std::floor(std::min({a.y, c.y, d.y})))), y1 = std::min(R - 1, int(std::ceil(std::max({a.y, c.y, d.y}))));
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) {
+                    Vec2 p{x + 0.5f, y + 0.5f};
+                    float w0 = cross2(c - p, d - p), w1 = cross2(d - p, a - p), w2 = cross2(a - p, c - p);
+                    bool inside = area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0) : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+                    if (inside && cover[size_t(y) * R + x] < 60000) cover[size_t(y) * R + x]++;
+                }
+        }
+    }
+    size_t covered = 0, multi = 0;
+    for (uint16_t c : cover) { covered += c > 0; multi += c > 1; }
+    q.efficiency = float(covered) / float(R * R);
+    q.overlap = covered ? float(multi) / float(covered) : 0.0f;
+    return q;
 }
 
 float flippedRatio(const Mesh& m)

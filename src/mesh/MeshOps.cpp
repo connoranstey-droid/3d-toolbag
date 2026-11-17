@@ -364,6 +364,31 @@ void mergeInto(Mesh& m, uint32_t src, uint32_t dst)
     remapFacesAndClean(m, remap);
 }
 
+void setEdgesHard(Mesh& m, const IndexList& edgeList, bool hard)
+{
+    if (m.edgeHard.size() != m.edges.size()) m.edgeHard.assign(m.edges.size(), 0);
+    if (edgeList.empty()) std::fill(m.edgeHard.begin(), m.edgeHard.end(), uint8_t(hard));
+    else for (uint32_t e : edgeList) if (e < m.numEdges()) m.edgeHard[e] = hard;
+    m.topologyId = nextVersionId();
+    m.touchPositions();
+}
+
+void setNormalAngle(Mesh& m, const IndexList& edgeList, float degrees)
+{
+    if (m.edgeHard.size() != m.edges.size()) m.edgeHard.assign(m.edges.size(), 0);
+    const float cosLimit = std::cos(radians(std::clamp(degrees, 0.0f, 180.0f)));
+    auto apply = [&](uint32_t e) {
+        uint32_t h = m.edges[e].he, t = m.heTwin[h];
+        if (t == kInvalid) { m.edgeHard[e] = 0; return; }
+        Vec3 a = m.faceNormal(m.heFace[h]), b = m.faceNormal(m.heFace[t]);
+        m.edgeHard[e] = dot(a, b) < cosLimit ? 1 : 0;
+    };
+    if (edgeList.empty()) for (uint32_t e = 0; e < m.numEdges(); ++e) apply(e);
+    else for (uint32_t e : edgeList) if (e < m.numEdges()) apply(e);
+    m.topologyId = nextVersionId();
+    m.touchPositions();
+}
+
 void collapseEdges(Mesh& m, const IndexList& edgeList)
 {
     UnionFind uf(m.numVerts());
@@ -493,12 +518,12 @@ IndexList insertEdgeLoop(Mesh& m, const EdgeLoopPlan& plan)
 {
     if (!plan.valid()) return {};
     std::vector<uint32_t> splitVert(m.numEdges(), kInvalid);
-    struct CreaseCarry { uint32_t a, m, b; float s; };
+    struct CreaseCarry { uint32_t a, m, b; float s; bool hard; };
     std::vector<CreaseCarry> carry;
     for (const auto& s : plan.splits) {
         const MeshEdge& e = m.edges[s.edge];
         splitVert[s.edge] = m.addVertex(lerp(m.positions[e.v0], m.positions[e.v1], s.t));
-        if (m.edgeCrease[s.edge] > 0) carry.push_back({e.v0, splitVert[s.edge], e.v1, m.edgeCrease[s.edge]});
+        if (m.edgeCrease[s.edge] > 0 || m.isHard(s.edge)) carry.push_back({e.v0, splitVert[s.edge], e.v1, m.edgeCrease[s.edge], m.isHard(s.edge)});
     }
     std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> cutOf;
     for (const auto& c : plan.cuts) cutOf[c.face] = {c.e0, c.e1};
@@ -548,7 +573,10 @@ IndexList insertEdgeLoop(Mesh& m, const EdgeLoopPlan& plan)
     m.faceVerts = std::move(nv);
     if (uv) { m.faceUVs = std::move(nu); m.weldUVs(); }
     m.buildTopology();
-    for (const auto& c : carry) { m.setCrease(c.a, c.m, c.s); m.setCrease(c.m, c.b, c.s); }
+    for (const auto& c : carry) {
+        if (c.s > 0) { m.setCrease(c.a, c.m, c.s); m.setCrease(c.m, c.b, c.s); }
+        if (c.hard) { m.setHard(c.a, c.m, true); m.setHard(c.m, c.b, true); }
+    }
     IndexList out;
     for (auto [a, b] : newEdges) {
         uint32_t e = m.findEdge(a, b);
@@ -668,12 +696,15 @@ void mirror(Mesh& m, int axis, float mergeThreshold)
         m.faceStart.push_back(uint32_t(m.faceVerts.size()));
     }
     if (uv) m.weldUVs();
-    // Mirror creases.
-    std::vector<std::tuple<uint32_t, uint32_t, float>> cr;
+    // Mirror creases and hard edges.
+    std::vector<std::tuple<uint32_t, uint32_t, float, bool>> cr;
     for (uint32_t e = 0; e < m.numEdges(); ++e)
-        if (m.edgeCrease[e] > 0) cr.push_back({mirrorOf[m.edges[e].v0], mirrorOf[m.edges[e].v1], m.edgeCrease[e]});
+        if (m.edgeCrease[e] > 0 || m.isHard(e)) cr.push_back({mirrorOf[m.edges[e].v0], mirrorOf[m.edges[e].v1], m.edgeCrease[e], m.isHard(e)});
     m.buildTopology();
-    for (auto [a, b, s] : cr) m.setCrease(a, b, s);
+    for (auto [a, b, s, hd] : cr) {
+        if (s > 0) m.setCrease(a, b, s);
+        if (hd) m.setHard(a, b, true);
+    }
 }
 
 std::vector<Mesh> separate(const Mesh& m)
@@ -710,10 +741,12 @@ std::vector<Mesh> separate(const Mesh& m)
     }
     // Carry creases.
     for (uint32_t e = 0; e < m.numEdges(); ++e) {
-        if (m.edgeCrease[e] <= 0) continue;
+        if (m.edgeCrease[e] <= 0 && !m.isHard(e)) continue;
         uint32_t a = m.edges[e].v0, b = m.edges[e].v1;
         auto it = compOf.find(uf.find(a));
-        if (it != compOf.end()) out[it->second].setCrease(local[a], local[b], m.edgeCrease[e]);
+        if (it == compOf.end()) continue;
+        if (m.edgeCrease[e] > 0) out[it->second].setCrease(local[a], local[b], m.edgeCrease[e]);
+        if (m.isHard(e)) out[it->second].setHard(local[a], local[b], true);
     }
     return out;
 }

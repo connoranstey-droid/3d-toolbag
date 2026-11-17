@@ -43,7 +43,8 @@ Command-line options: `Facet scene.facet`, `Facet model.obj|model.fbx`, `Facet -
 
 ```sh
 ./build/facet_tests                 # geometry core: topology, subdivision, bevel/bridge/cut, UV tools, BVH
-./build/facet_iotests               # FBX binary round trip + ASCII FBX parsing
+./build/facet_iotests               # FBX binary round trip (incl. hard edges) + ASCII FBX parsing
+./build/facet_plugintests           # loads the Smart Unwrap plugin and benchmarks it vs. automatic mapping
 xvfb-run -a ./build/facet_uitests   # drives the real window with synthesized mouse/keys
 ```
 
@@ -77,6 +78,50 @@ by Assimp (binary 7.5 and ASCII) import correctly.
 - **Target Weld**: drag one vertex onto another.
 - **Symmetry** (status line / Mesh Tools): object X/Y/Z. Selection and all component transforms
   are mirrored, and seam vertices stay on the plane.
+
+**Hard / soft edges** (Mesh Display menu, Tools shelf, edge marking menu)
+- Per-edge hardness with split normals in the viewport: Harden Edge, Soften Edge, and Set Normal
+  Angle (edges sharper than N degrees go hard). Works on selected edges, or whole objects in
+  object mode. "Show Hard Edges" highlights them.
+- Maya-like defaults: cube edges and cylinder/cone caps are hard; curved primitives are soft.
+  Bevel hardens only sharp boundaries (30°), and rounded bevels shade smoothly.
+- Kept through every modeling op, saved in scenes, and exported to FBX as per-edge smoothing
+  (Maya reads it as soft/hard). On FBX import, hard edges come from the smoothing layer or are
+  recovered from split normals (Blender, Unity and Unreal exports).
+
+**Plugins** (Plugins menu, Plugin Manager)
+- Plugins are Qt shared libraries implementing `src/plugin/PluginApi.h`. Facet loads them from
+  `plugins/` next to the executable, `<build>/plugins`, or `FACET_PLUGIN_PATH`.
+- Each plugin command appears in the Plugins menu and in the menu it names, gets an options
+  dialog generated from its declared options, and runs on copies of the selected meshes as one
+  undo step.
+- Plugins link only against the geometry core (`facet_core`, a shared library) and QtCore.
+
+**Smart Unwrap plugin** (`plugins/smart_unwrap`, also in the UV menu): automatic mapping that
+produces good shells and uniform texel density.
+1. Grows shells by curvature (best-first, by normal deviation), stopping at hard edges and
+   optionally at existing seams. Fragment-sized shells merge into neighbours.
+2. Unfolds each shell in world space with LSCM, solved by IC(0)-preconditioned conjugate gradients.
+3. Splits a shell recursively if it has flipped faces or too much area or angle distortion.
+4. Scales every shell to the same world-space texel density, so non-uniformly scaled objects
+   also come out right.
+5. Packs shells with a shape-aware raster packer (4 rotations, padding in texture pixels) and
+   binary-searches the largest density that fits. "Pack together" gives several objects one
+   shared density.
+
+Benchmark (`facet_plugintests`), Automatic → Smart Unwrap:
+
+| Mesh | Area / angle distortion | Coverage of 0–1 | Density spread |
+|---|---|---|---|
+| Sphere | 1.13 / 1.24 → 1.06 / 1.02 | 52% → 53% | 0.001 → 0 |
+| Torus | 1.11 / 1.19 → 1.04 / 1.02 | 48% → 55% | 0.001 → 0 |
+| Rounded box | 1.08 / 1.06 (0.45% overlap) → 1.00 / 1.00 | 63% → 62% | 0.012 → 0 |
+| Lumpy sculpt | 16 flipped faces → 1.06 / 1.01 | 40% → 59% | 0.010 → 0 |
+| Scaled cylinder | 1.44 / 2.47 → 1.00 / 1.00 | 68% → 66% | 0.232 → 0 |
+
+32k faces unwrap in about 2 s. UV quality metrics are available to plugins as `uv::measure()`.
+
+![smart unwrap](docs/smart-unwrap.png)
 
 **UVs** (UV menu, UV shelf, and a floating **UV Editor**, Ctrl+Shift+U)
 - Face-varying UVs kept through every modeling op, through subdivision and through OBJ/FBX.
@@ -156,6 +201,7 @@ src/math      Vec/Mat/AABB/Ray (no dependencies)
 src/mesh      Mesh (half-edge + face-varying UVs), Subdivision, MeshOps, BevelBridge, UVOps (LSCM),
               BVH, Primitives, ObjIO   ← pure C++, unit-tested
 src/io        FBX reader (binary + ASCII) and binary 7.4 writer (Qt zlib)
+src/plugin    Plugin API (header-only)            plugins/smart_unwrap   Smart Unwrap plugin
 src/scene     Scene, objects + construction history, undo commands, Modeling (high-level commands)
 src/render    OpenGL 4.1 core renderer: studio-lit shading, cage/smooth wires, overlays, ID pick pass
 src/viewport  Viewport widget: cameras, picking, manipulators, tools, HUD
@@ -168,7 +214,7 @@ so undo/redo just swaps mesh snapshots and everything stays in sync.
 
 ## Roadmap (high-poly / VFX priorities)
 
-1. **Hard/soft edge normals** (fixes faceted shading at bevel boundaries), normal locking; displacement and normal baking.
+1. Weighted normals / normal locking; displacement and normal baking.
 2. Offset Edge Loop, Slide Edge, Poke, Wedge; bevel with chamfer-mitering options; world-space symmetry.
 3. **Sculpting**: multires / dynamic-tessellation brushes (grab, smooth, crease, inflate, clay) on millions of polys, with masks and layers.
 4. UV: optimize (ARAP), straighten shells, texel-density tools, UDIM tiles, image textures.

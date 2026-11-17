@@ -21,6 +21,10 @@ QString mirror(Scene& s, int axis);
 QString combine(Scene& s);
 QString separate(Scene& s);
 QString setCrease(Scene& s, float value);
+// Shading: hard / soft edges (selected edges in edge/face/vertex mode, whole objects in object mode).
+QString hardenEdges(Scene& s);
+QString softenEdges(Scene& s);
+QString setNormalAngle(Scene& s, float degrees);
 QString freezeTransforms(Scene& s);
 QString centerPivot(Scene& s);
 QString resetTransforms(Scene& s);

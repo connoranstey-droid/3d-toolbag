@@ -4,6 +4,7 @@
 #include "ui/MarkingMenu.h"
 #include "ui/Outliner.h"
 #include "ui/UVEditor.h"
+#include "ui/PluginManager.h"
 #include "viewport/Viewport.h"
 
 #include <QAction>
@@ -65,6 +66,9 @@ MainWindow::MainWindow()
     buildStatusLine();
     buildShelf();
     buildDocks();
+    plugins_ = new PluginManager(scene_, this);
+    plugins_->loadAll();
+    buildPluginMenus();
 
     connect(&scene_->undo, &QUndoStack::cleanChanged, this, &MainWindow::updateTitle);
     connect(scene_, &Scene::modeChanged, this, [this] {
@@ -409,6 +413,19 @@ void MainWindow::buildMenus()
     QMenu* md = add("Mesh &Display");
     addAct(md, "&Reverse Normals", {}, [&s] { return M::reverseNormals(s); }, true);
     md->addSeparator();
+    addAct(md, "&Soften Edge", {}, [&s] { return M::softenEdges(s); }, true);
+    addAct(md, "&Harden Edge", {}, [&s] { return M::hardenEdges(s); }, true);
+    addAct(md, "Set Normal &Angle...", {}, [this] {
+        bool ok = false;
+        double a = QInputDialog::getDouble(this, "Set Normal Angle", "Edges sharper than this angle become hard:", normalAngle_, 0, 180, 1, &ok);
+        if (!ok) return QString();
+        normalAngle_ = float(a);
+        return M::setNormalAngle(*scene_, normalAngle_);
+    }, true);
+    QAction* showHard = addAct(md, "Show Hard Edges", {}, nullptr);
+    showHard->setCheckable(true);
+    connect(showHard, &QAction::toggled, this, [this](bool on) { viewport_->options.showHardEdges = on; viewport_->update(); });
+    md->addSeparator();
     addAct(md, "Smooth Preview Off", {QKeySequence("1")}, [&s] { return M::setSmoothDisplay(s, 0); });
     addAct(md, "Smooth Preview: Cage + Smooth", {QKeySequence("2")}, [&s] { return M::setSmoothDisplay(s, 1); });
     addAct(md, "Smooth Preview: Smooth", {QKeySequence("3")}, [&s] { return M::setSmoothDisplay(s, 2); });
@@ -530,6 +547,9 @@ void MainWindow::buildShelf()
         {"Multi-Cut", "Multi-Cut tool", [this] { toolActs_[5]->trigger(); return QString(); }},
         {"Target Weld", "Drag a vertex onto another", [this] { toolActs_[6]->trigger(); return QString(); }},
         {"Insert Loop", "Insert Edge Loop tool", [this] { toolActs_[4]->trigger(); return QString(); }},
+        {"Harden", "Harden selected edges (whole object in object mode)", [&s] { return M::hardenEdges(s); }},
+        {"Soften", "Soften selected edges", [&s] { return M::softenEdges(s); }},
+        {"Angle 30", "Hard above 30°, soft below", [&s] { return M::setNormalAngle(s, 30.0f); }},
         {"|", "", nullptr},
         {"Sym X", "Toggle object-X symmetry", [this] {
             auto* c = findChild<QComboBox*>("symmetryCombo");
@@ -667,6 +687,8 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                      {"Make Live", D::SE, run([&s] { return M::toggleLive(s); })},
                      {"Quad Draw", D::SW, run([this] { toolActs_[7]->trigger(); return QString(); })},
                      {"Automatic UVs", D::List, run([&s] { return M::projectUVs(s, M::Projection::Automatic); })},
+                     {"Soften Edges", D::List, run([&s] { return M::softenEdges(s); })},
+                     {"Normal Angle 30°", D::List, run([&s] { return M::setNormalAngle(s, 30.0f); })},
                      {"Freeze Transformations", D::List, run([&s] { return M::freezeTransforms(s); })},
                      {"Center Pivot", D::List, run([&s] { return M::centerPivot(s); })},
                      {"Delete History", D::List, run([&s] { return M::deleteHistory(s); })},
@@ -699,6 +721,8 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                      {"Select Ring", D::SW, run([&s] { return M::selectEdgeRing(s); })},
                      {"Bevel", D::List, run([this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); })},
                      {"Bridge", D::List, run([this] { return M::bridge(*scene_, bridgeDivisions_); })},
+                     {"Harden Edge", D::List, run([&s] { return M::hardenEdges(s); })},
+                     {"Soften Edge", D::List, run([&s] { return M::softenEdges(s); })},
                      {"Multi-Cut", D::List, run([this] { toolActs_[5]->trigger(); return QString(); })},
                      {"Cut UVs", D::List, run([&s] { return M::cutUVs(s); })},
                      {"Sew UVs", D::List, run([&s] { return M::sewUVs(s); })},
@@ -845,6 +869,115 @@ void MainWindow::showHotkeys()
 <tr><td><b>Alt+B</b></td><td>Cycle background</td></tr>
 <tr><td><b>Ctrl+H / Shift+H</b></td><td>Hide selected / show all</td></tr>
 </table>)");
+    auto* l = new QVBoxLayout(d);
+    l->addWidget(tb);
+    d->show();
+}
+
+void MainWindow::buildPluginMenus()
+{
+    QMenu* pm = menuBar()->addMenu("&Plugins");
+    menus_.emplace_back("Plugins", pm);
+    addAct(pm, "Plugin Manager...", {}, [this] { showPluginManager(); return QString(); });
+    pm->addSeparator();
+    for (const auto& lp : plugins_->plugins()) {
+        QMenu* sub = pm->addMenu(lp.plugin->name());
+        for (const PluginCommand& c : lp.commands) {
+            PluginCommand cmd = c;
+            auto run = [this, cmd] { return plugins_->run(cmd); };
+            QAction* a = addAct(sub, cmd.label, {}, run, true);
+            a->setToolTip(cmd.tooltip);
+            if (!cmd.options.empty())
+                addAct(sub, cmd.label + " Options...", {}, [this, cmd] {
+                    if (pluginOptionsDialog(cmd)) return plugins_->run(cmd);
+                    return QString();
+                });
+            // Also list it in the menu it asks for (e.g. UV).
+            for (auto& [title, menu] : menus_)
+                if (!cmd.menu.isEmpty() && title == cmd.menu) {
+                    menu->addSeparator();
+                    QAction* b = addAct(menu, cmd.label + "  (plugin)", {}, run, true);
+                    b->setToolTip(cmd.tooltip);
+                    if (!cmd.options.empty())
+                        addAct(menu, cmd.label + " Options...", {}, [this, cmd] {
+                            if (pluginOptionsDialog(cmd)) return plugins_->run(cmd);
+                            return QString();
+                        });
+                }
+        }
+    }
+    if (plugins_->plugins().empty()) pm->addAction("(no plugins found)")->setEnabled(false);
+}
+
+bool MainWindow::pluginOptionsDialog(const PluginCommand& c)
+{
+    QDialog d(this);
+    d.setWindowTitle(c.label + " Options");
+    auto* f = new QFormLayout(&d);
+    QVariantMap cur = plugins_->options(c);
+    std::vector<std::function<void(QVariantMap&)>> readers;
+    for (const PluginOption& o : c.options) {
+        QVariant v = cur.value(o.key, o.defaultValue);
+        QWidget* w = nullptr;
+        if (o.defaultValue.typeId() == QMetaType::Bool) {
+            auto* cb = new QCheckBox;
+            cb->setChecked(v.toBool());
+            readers.push_back([cb, k = o.key](QVariantMap& m) { m[k] = cb->isChecked(); });
+            w = cb;
+        } else if (o.defaultValue.typeId() == QMetaType::Int) {
+            auto* sb = new QSpinBox;
+            sb->setRange(int(o.minimum), int(std::min(o.maximum, 2e9)));
+            sb->setValue(v.toInt());
+            readers.push_back([sb, k = o.key](QVariantMap& m) { m[k] = sb->value(); });
+            w = sb;
+        } else {
+            auto* sb = new QDoubleSpinBox;
+            sb->setDecimals(3);
+            sb->setRange(o.minimum, o.maximum);
+            sb->setValue(v.toDouble());
+            readers.push_back([sb, k = o.key](QVariantMap& m) { m[k] = sb->value(); });
+            w = sb;
+        }
+        w->setToolTip(o.tooltip);
+        f->addRow(o.label + ":", w);
+    }
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    bb->button(QDialogButtonBox::Ok)->setText("Apply");
+    f->addRow(bb);
+    connect(bb, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+    if (d.exec() != QDialog::Accepted) return false;
+    QVariantMap out;
+    for (auto& r : readers) r(out);
+    plugins_->setOptions(c, out);
+    return true;
+}
+
+void MainWindow::showPluginManager()
+{
+    QString html = "<h3>Loaded plugins</h3>";
+    if (plugins_->plugins().empty()) html += "<p>None.</p>";
+    for (const auto& p : plugins_->plugins()) {
+        html += QString("<p><b>%1</b> %2<br><i>%3</i><br>%4<br>Commands: ")
+                    .arg(p.plugin->name().toHtmlEscaped(), p.plugin->version().toHtmlEscaped(), p.file.toHtmlEscaped(),
+                         p.plugin->description().toHtmlEscaped());
+        QStringList cmds;
+        for (const auto& c : p.commands) cmds << c.label.toHtmlEscaped();
+        html += cmds.join(", ") + "</p>";
+    }
+    html += "<h3>Search paths</h3><ul>";
+    for (const QString& s : plugins_->searchPaths()) html += "<li>" + s.toHtmlEscaped() + "</li>";
+    html += "</ul><p>Add folders with the <code>FACET_PLUGIN_PATH</code> environment variable.</p>";
+    if (!plugins_->errors().isEmpty()) {
+        html += "<h3>Errors</h3><ul>";
+        for (const QString& e : plugins_->errors()) html += "<li>" + e.toHtmlEscaped() + "</li>";
+        html += "</ul>";
+    }
+    auto* d = new QDialog(this);
+    d->setWindowTitle("Plugin Manager");
+    d->resize(620, 420);
+    auto* tb = new QTextBrowser(d);
+    tb->setHtml(html);
     auto* l = new QVBoxLayout(d);
     l->addWidget(tb);
     d->show();
