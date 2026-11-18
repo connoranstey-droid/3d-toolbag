@@ -40,7 +40,7 @@ QRect MarkingMenu::itemRect(int i) const
 {
     const Item& it = items_[size_t(i)];
     QFontMetrics fm(font());
-    int w = fm.horizontalAdvance(it.label) + 22;
+    int w = fm.horizontalAdvance(it.checked ? QString::fromUtf8("✓ ") + it.label : it.label) + 22;
     if (it.dir != List) {
         QPoint o = kDirOffset[it.dir];
         float diag = (o.x() != 0 && o.y() != 0) ? 0.72f : 1.0f;
@@ -52,7 +52,8 @@ QRect MarkingMenu::itemRect(int i) const
     int idx = 0;
     for (int k = 0; k < i; ++k)
         if (items_[size_t(k)].dir == List) ++idx;
-    int top = center_.y() + int(kRadius * 0.78f) + kItemH;
+    // Leave a gap under the South item so a downward flick still means South.
+    int top = center_.y() + int(kRadius * 0.78f) + kItemH * 2;
     return QRect(center_.x() - 85, top + idx * kItemH, 170, kItemH - 1);
 }
 
@@ -159,7 +160,7 @@ void Hotbox::showAt(QPoint g, std::vector<std::vector<Entry>> rows)
     cells_.clear();
     QFontMetrics fm(font());
     int rowH = 26;
-    int y = center_.y() - int(rows.size()) * rowH / 2 - 30;
+    int y = center_.y() - 70 - int(rows.size()) * rowH;
     for (const auto& row : rows) {
         int total = 0;
         for (const auto& e : row) total += fm.horizontalAdvance(e.title) + 26;
@@ -191,8 +192,12 @@ void Hotbox::paintEvent(QPaintEvent*)
         p.setPen(QColor(230, 230, 230));
         p.drawText(cells_[size_t(i)].rect, Qt::AlignCenter, cells_[size_t(i)].title);
     }
-    p.setPen(QColor(220, 220, 220, 160));
-    p.drawText(QRect(center_.x() - 150, center_.y() + 40, 300, 18), Qt::AlignCenter, "Hotbox — release Space to close");
+    p.setPen(QPen(QColor(255, 255, 255, 90), 1, Qt::DashLine));
+    p.setBrush(QColor(255, 255, 255, 18));
+    p.drawEllipse(center_, 60, 60);
+    p.setPen(QColor(220, 220, 220, 200));
+    p.drawText(QRect(center_.x() - 60, center_.y() - 9, 120, 18), Qt::AlignCenter, "Views (click)");
+    p.drawText(QRect(center_.x() - 150, center_.y() + 66, 300, 18), Qt::AlignCenter, "Hotbox — release Space to close");
 }
 
 void Hotbox::mouseMoveEvent(QMouseEvent* e)
@@ -213,6 +218,13 @@ void Hotbox::mousePressEvent(QMouseEvent* e)
             m->popup(at);
             return;
         }
+    QPoint d = e->position().toPoint() - center_;
+    if (std::hypot(d.x(), d.y()) < 70.0) {
+        QPoint g = mapToGlobal(e->position().toPoint());
+        hide();
+        emit centerClicked(g);
+        return;
+    }
     hide();
 }
 

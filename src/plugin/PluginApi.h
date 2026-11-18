@@ -42,6 +42,7 @@ struct PluginCommand {
     QString tooltip;
     std::vector<PluginOption> options;
     bool uvOnly = false;               // true: keeps construction history (geometry untouched)
+    QString shortcut;                  // optional default hotkey, e.g. "Ctrl+Alt+U" (user can rebind)
     // Returns a status message for the help line.
     std::function<QString(std::vector<PluginMesh>& meshes, const QVariantMap& options)> run;
 };

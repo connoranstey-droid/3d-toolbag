@@ -1,5 +1,6 @@
 #pragma once
 #include "scene/Scene.h"
+#include "ui/MarkingMenu.h"
 
 #include <QWidget>
 
@@ -19,6 +20,10 @@ public:
     XTool xtool = XTool::Move;
     void frame(bool selectionOnly);
     std::function<void(const QString&)> report;
+    // Items for the RMB (kind 0) and Shift+RMB (kind 1) marking menus, supplied by the editor.
+    std::function<std::vector<MarkingMenu::Item>(int kind, QString& title)> markingItems;
+    MarkingMenu* markingMenu() { return mm_; }
+    void selectAllUVs();
     QPointF toScreen(Vec2 uv) const;
     Vec2 toUV(QPointF p) const;
 
@@ -33,7 +38,7 @@ protected:
     void resizeEvent(QResizeEvent* e) override;
 
 private:
-    enum class Drag { None, Pan, Zoom, Marquee, Xform };
+    enum class Drag { None, Pan, Zoom, Marquee, Xform, Menu };
     struct XEntry {
         SceneObject* obj;
         std::shared_ptr<Mesh> mesh;
@@ -55,6 +60,7 @@ private:
     std::vector<XEntry> xform_;
     Vec2 pivot_;
     bool userMoved_ = false;
+    MarkingMenu* mm_ = nullptr;
 };
 
 // Dockable editor: toolbar + canvas.
@@ -68,6 +74,8 @@ public:
 private:
     UVCanvas* canvas_;
     QAction* checker_ = nullptr;
+    QAction* modeActs_[2] = {};
+    QAction* toolActs_[3] = {};
 };
 
 } // namespace facet

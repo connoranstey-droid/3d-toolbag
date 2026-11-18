@@ -9,6 +9,7 @@
 #include <QString>
 #include <QUndoStack>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -132,6 +133,14 @@ public:
         float radiusPx = 60.0f;
         float strength = 0.5f;
     } sculpt;
+
+    // Isolate Select (Ctrl+1): only these objects are drawn and pickable.
+    bool isolateActive = false;
+    std::vector<uint32_t> isolateSet;
+    bool isShown(const SceneObject* o) const
+    {
+        return o->st.visible && (!isolateActive || std::find(isolateSet.begin(), isolateSet.end(), o->id) != isolateSet.end());
+    }
 
     // ---- tool state shared by UI and viewport ----
     Tool tool() const { return tool_; }

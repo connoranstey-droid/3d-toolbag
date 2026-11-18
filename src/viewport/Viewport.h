@@ -28,6 +28,9 @@ public:
     void frameSelected(bool allViews = false);
     void frameAll(bool allViews = false);
     void cycleBackground();
+    // Maya's +/- manipulator size.
+    void scaleManipulator(float factor) { gizmoScale_ = std::clamp(gizmoScale_ * factor, 0.25f, 4.0f); update(); }
+    float manipulatorScale() const { return gizmoScale_; }
     Camera& activeCamera() { return cams_[size_t(active_)]; }
     // Widget coordinates of a world point in the active view (used by tools and tests).
     QPoint worldToWidget(const Vec3& w) const
@@ -206,6 +209,7 @@ private:
     QuadState qd_;
     bool tabHeld_ = false;
     bool mHeld_ = false;
+    float gizmoScale_ = 1.0f;
     SculptState sc_;
 
     bool bHeld_ = false, bUsed_ = false, xHeld_ = false, jHeld_ = false, spaceHeld_ = false, hotboxShown_ = false;

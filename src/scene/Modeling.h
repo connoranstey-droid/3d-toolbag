@@ -30,6 +30,7 @@ QString setWeightedNormals(Scene& s, float power);
 // Sculpt mask helpers
 QString invertMask(Scene& s);
 QString clearMask(Scene& s);
+QString toggleIsolate(Scene& s);
 QString freezeTransforms(Scene& s);
 QString centerPivot(Scene& s);
 QString resetTransforms(Scene& s);

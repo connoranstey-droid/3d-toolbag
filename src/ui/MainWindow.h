@@ -51,6 +51,10 @@ private:
     void showPluginManager();
 public:
     class PluginManager* pluginManager() { return plugins_; }
+    class HotkeyManager* hotkeyManager() { return hotkeys_; }
+    // Builds (but does not show) the Outliner right-click menu for the current selection.
+    QMenu* buildOutlinerMenu();
+    void showHotkeyEditor();
 private:
 
     Scene* scene_;
@@ -78,6 +82,9 @@ private:
     class UVEditor* uvEditor_ = nullptr;
     QAction* checkerAct_ = nullptr;
     class PluginManager* plugins_ = nullptr;
+    class HotkeyManager* hotkeys_ = nullptr;
+    class Outliner* outliner_ = nullptr;
+    Tool lastSpecialTool_ = Tool::InsertEdgeLoop;
     QAction* softAct_ = nullptr;
     QString helpText_;
 };

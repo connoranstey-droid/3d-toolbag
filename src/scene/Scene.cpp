@@ -161,6 +161,8 @@ void Scene::clear()
     undo.clear();
     liveId = 0;
     liveBvhFor_ = 0;
+    isolateActive = false;
+    isolateSet.clear();
     objects.clear();
     selection_.clear();
     mode_ = SelectMode::Object;

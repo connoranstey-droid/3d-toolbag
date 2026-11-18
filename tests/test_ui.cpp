@@ -4,6 +4,11 @@
 #include "viewport/Viewport.h"
 #include "ui/UVEditor.h"
 #include "ui/PluginManager.h"
+#include "ui/Hotkeys.h"
+#include "ui/ChannelBox.h"
+#include "ui/MarkingMenu.h"
+#include <QMenu>
+#include <QSettings>
 #include "mesh/UVOps.h"
 
 #include <QApplication>
@@ -56,6 +61,10 @@ int main(int argc, char** argv)
     fmt.setDepthBufferSize(24);
     QSurfaceFormat::setDefaultFormat(fmt);
     QApplication app(argc, argv);
+    // Keep the user's real hotkey settings untouched.
+    QCoreApplication::setOrganizationName("FacetUITest");
+    QCoreApplication::setApplicationName("FacetUITest");
+    QSettings().clear();
 
     MainWindow w;
     w.resize(1400, 900);
@@ -492,6 +501,182 @@ int main(int argc, char** argv)
         CHECK(sp->mesh().normalWeightPower == 0.0f);
     }
     std::printf("%s sculpt + weighted normals\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- hotkeys: defaults, editor rebinding, conflicts, persistence ----
+    {
+        s.clear();
+        s.setTool(Tool::Select);
+        s.setMode(SelectMode::Object);
+        HotkeyManager* hk = w.hotkeyManager();
+        CHECK(hk && hk->entries().size() > 100);
+        auto shortcutOf = [&](const QString& id) {
+            auto* e = hk->find(id);
+            return e && e->action ? e->action->shortcut().toString(QKeySequence::PortableText) : QString("<missing>");
+        };
+        CHECK(shortcutOf("Edit/Duplicate") == "Ctrl+D");
+        CHECK(shortcutOf("Tools/Multi-Cut Tool") == "Ctrl+Shift+X");
+        CHECK(shortcutOf("Smart Unwrap/Smart Unwrap") == "Ctrl+Alt+U");
+        // Rebind Duplicate to Ctrl+J and use it.
+        M::createPrimitive(s, "polyCube");
+        hk->assign("Edit/Duplicate", QKeySequence("Ctrl+J"));
+        key(vp, Qt::Key_J, Qt::ControlModifier);
+        CHECK(s.objects.size() == 2);
+        key(vp, Qt::Key_D, Qt::ControlModifier); // old binding no longer duplicates
+        CHECK(s.objects.size() == 2);
+        CHECK(QSettings().value("hotkeys/Edit/Duplicate").toStringList() == QStringList{"Ctrl+J"});
+        // Conflicts: giving Move the Q key takes it from the Select Tool.
+        auto taken = hk->assign("Modify/Move Tool", QKeySequence("Q"));
+        CHECK(taken.contains("Modify/Select Tool"));
+        CHECK(shortcutOf("Modify/Select Tool").isEmpty());
+        key(vp, Qt::Key_Q);
+        CHECK(s.tool() == Tool::Move);
+        hk->resetAll();
+        CHECK(shortcutOf("Modify/Select Tool") == "Q" && shortcutOf("Edit/Duplicate") == "Ctrl+D");
+        CHECK(!QSettings().contains("hotkeys/Edit/Duplicate"));
+        // The editor dialog opens and lists commands.
+        key(vp, Qt::Key_F1);
+        auto* ed = w.findChild<HotkeyEditor*>();
+        CHECK(ed && ed->isVisible());
+        if (ed) ed->close();
+        // New default hotkeys.
+        key(vp, Qt::Key_X, Qt::ControlModifier | Qt::ShiftModifier);
+        CHECK(s.tool() == Tool::MultiCut);
+        key(vp, Qt::Key_W);
+        key(vp, Qt::Key_Y); // Maya: last tool used
+        CHECK(s.tool() == Tool::MultiCut);
+        key(vp, Qt::Key_Q);
+        float g0 = vp->manipulatorScale();
+        key(vp, Qt::Key_Equal);
+        CHECK(vp->manipulatorScale() > g0);
+        key(vp, Qt::Key_Minus);
+        CHECK(std::abs(vp->manipulatorScale() - g0) < 1e-4f);
+    }
+    std::printf("%s hotkeys + editor\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- isolate select (Ctrl+1) ----
+    {
+        s.clear();
+        M::createPrimitive(s, "polyCube");
+        SceneObject* keep = s.lead();
+        M::createPrimitive(s, "polySphere");
+        SceneObject* other = s.lead();
+        other->st.translate = {3, 0, 0};
+        vp->frameAll();
+        s.selectObjects({keep->id}, SelectOp::Replace);
+        key(vp, Qt::Key_1, Qt::ControlModifier);
+        CHECK(s.isolateActive && s.isShown(keep) && !s.isShown(other));
+        vp->repaint();
+        click(vp, vp->worldToWidget({3, 0, 0})); // hidden object is not pickable
+        CHECK(s.selection().empty());
+        key(vp, Qt::Key_1, Qt::ControlModifier);
+        CHECK(!s.isolateActive && s.isShown(other));
+    }
+    std::printf("%s isolate select\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- marking menus: create (Shift+RMB on empty), sculpt brushes (RMB in Sculpt) ----
+    {
+        s.clear();
+        s.setTool(Tool::Select);
+        vp->frameAll();
+        vp->repaint();
+        QPoint c0(vp->width() / 2, vp->height() / 2);
+        press(vp, c0, Qt::RightButton, Qt::ShiftModifier);
+        for (int i = 1; i <= 6; ++i) moveTo(vp, c0 - QPoint(0, 20 * i), Qt::RightButton, Qt::ShiftModifier);
+        release(vp, c0 - QPoint(0, 120), Qt::RightButton, Qt::ShiftModifier);
+        QApplication::processEvents();
+        CHECK(s.objects.size() == 1 && s.objects[0]->st.history && s.objects[0]->st.history->type == "polySphere");
+        // Sculpt: RMB flick south -> Smooth brush.
+        vp->frameAll();
+        s.setTool(Tool::Sculpt);
+        s.sculpt.brush = sculpt::Brush::Draw;
+        vp->repaint();
+        QPoint c = vp->worldToWidget({0, 0, 0});
+        press(vp, c, Qt::RightButton);
+        for (int i = 1; i <= 6; ++i) moveTo(vp, c + QPoint(0, 15 * i), Qt::RightButton);
+        release(vp, c + QPoint(0, 90), Qt::RightButton);
+        QApplication::processEvents();
+        CHECK(s.sculpt.brush == sculpt::Brush::Smooth);
+        s.setTool(Tool::Select);
+    }
+    std::printf("%s create + sculpt marking menus\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- hotbox centre zone: view menu ----
+    {
+        QTest::keyPress(vp, Qt::Key_Space);
+        QTest::qWait(350);
+        Hotbox* hb = w.findChild<Hotbox*>();
+        CHECK(hb && hb->isVisible());
+        if (hb && hb->isVisible()) {
+            QPoint centre = hb->mapFromGlobal(QCursor::pos());
+            QPoint local = hb->rect().contains(centre) ? centre : hb->rect().center();
+            // The hotbox is centred where the cursor was when Space went down.
+            press(hb, local);
+            MarkingMenu* mm = nullptr;
+            for (auto* m : w.findChildren<MarkingMenu*>()) if (m->isVisible()) mm = m;
+            CHECK(mm != nullptr);
+            if (mm) mm->hide();
+        }
+        QTest::keyRelease(vp, Qt::Key_Space);
+        vp->setSingleView(ViewKind::Persp);
+    }
+    std::printf("%s hotbox centre views\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- UV editor marking menu: RMB flick south -> UV Shell mode ----
+    {
+        s.clear();
+        M::createPrimitive(s, "polyCube");
+        key(vp, Qt::Key_U, Qt::ControlModifier | Qt::ShiftModifier);
+        UVCanvas* cv = w.findChild<UVCanvas*>();
+        CHECK(cv && cv->isVisible());
+        if (cv) {
+            QApplication::processEvents();
+            cv->mode = UVCanvas::Mode::UV;
+            QPoint c(cv->width() / 2, cv->height() / 2);
+            press(cv, c, Qt::RightButton);
+            for (int i = 1; i <= 6; ++i) moveTo(cv, c + QPoint(0, 15 * i), Qt::RightButton);
+            release(cv, c + QPoint(0, 90), Qt::RightButton);
+            QApplication::processEvents();
+            CHECK(cv->mode == UVCanvas::Mode::Shell);
+            // Shift+RMB flick west -> cylindrical projection (undoable uv edit).
+            size_t undoBefore = size_t(s.undo.count());
+            press(cv, c, Qt::RightButton, Qt::ShiftModifier);
+            for (int i = 1; i <= 6; ++i) moveTo(cv, c - QPoint(20 * i, 0), Qt::RightButton, Qt::ShiftModifier);
+            release(cv, c - QPoint(120, 0), Qt::RightButton, Qt::ShiftModifier);
+            QApplication::processEvents();
+            CHECK(size_t(s.undo.count()) == undoBefore + 1);
+        }
+    }
+    std::printf("%s uv editor marking menus\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
+    // ---- right-click context menus: Outliner and Channel Box ----
+    {
+        s.clear();
+        M::createPrimitive(s, "polyCube");
+        SceneObject* cb = s.lead();
+        QMenu* om = w.buildOutlinerMenu();
+        QAction* dup = nullptr;
+        for (QAction* a : om->actions()) if (a->text() == "Duplicate") dup = a;
+        CHECK(dup && dup->isEnabled());
+        if (dup) dup->trigger();
+        CHECK(s.objects.size() == 2);
+        delete om;
+        s.selectObjects({cb->id}, SelectOp::Replace);
+        cb->st.translate.x = 4.0f;
+        s.notifyChanged();
+        ChannelBox* box = w.findChild<ChannelBox*>();
+        CHECK(box != nullptr);
+        if (box) {
+            int tx = -1;
+            for (int i = 0; i < box->channelCount(); ++i) if (box->channelLabel(i) == "Translate X") tx = i;
+            CHECK(tx >= 0);
+            QMenu* cm = box->channelMenu(tx);
+            CHECK(!cm->actions().isEmpty() && cm->actions()[0]->text().startsWith("Reset Translate X"));
+            cm->actions()[0]->trigger();
+            CHECK(std::abs(cb->st.translate.x) < 1e-6f);
+            delete cm;
+        }
+    }
+    std::printf("%s context menus\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
 
     // ---- save / load roundtrip ----
     s.clear();

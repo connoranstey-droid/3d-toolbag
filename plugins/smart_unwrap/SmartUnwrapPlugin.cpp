@@ -11,6 +11,7 @@ std::vector<PluginCommand> SmartUnwrapPlugin::commands()
     c.label = "Smart Unwrap";
     c.tooltip = "Automatic mapping with good shells and uniform texel density";
     c.uvOnly = true;
+    c.shortcut = "Ctrl+Alt+U";
     c.options = {
         {"angleLimit", "Shell angle limit (deg)", 66.0, 5, 89, "Maximum normal deviation inside one shell"},
         {"maxStretch", "Max area stretch", 1.1, 1.01, 3, "Shells distorted more than this are split"},

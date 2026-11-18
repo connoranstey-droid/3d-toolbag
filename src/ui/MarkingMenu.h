@@ -55,6 +55,10 @@ public:
     void showAt(QPoint globalCenter, std::vector<std::vector<Entry>> rows);
     void dismiss();
 
+signals:
+    // Click in the hotbox centre zone (Maya's centre marking menu: view switching).
+    void centerClicked(QPoint globalPos);
+
 protected:
     void paintEvent(QPaintEvent*) override;
     void mouseMoveEvent(QMouseEvent* e) override;

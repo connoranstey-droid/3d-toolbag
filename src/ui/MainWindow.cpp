@@ -5,6 +5,7 @@
 #include "ui/Outliner.h"
 #include "ui/UVEditor.h"
 #include "ui/PluginManager.h"
+#include "ui/Hotkeys.h"
 #include "viewport/Viewport.h"
 
 #include <QAction>
@@ -41,6 +42,7 @@ namespace M = modeling;
 MainWindow::MainWindow()
 {
     scene_ = new Scene(this);
+    hotkeys_ = new HotkeyManager(this);
     central_ = new QWidget(this);
     auto* lay = new QVBoxLayout(central_);
     lay->setContentsMargins(0, 0, 0, 0);
@@ -69,6 +71,25 @@ MainWindow::MainWindow()
     plugins_ = new PluginManager(scene_, this);
     plugins_->loadAll();
     buildPluginMenus();
+    hotkeys_->load(); // user overrides from the Hotkey Editor
+    connect(hotbox_, &Hotbox::centerClicked, this, [this](QPoint g) {
+        using D = MarkingMenu::Dir;
+        auto view = [this](ViewKind k) { return [this, k] { viewport_->setSingleView(k); }; };
+        marking_->popup(g,
+                        {{"Top", D::N, view(ViewKind::Top)},
+                         {"Front", D::S, view(ViewKind::Front)},
+                         {"Side", D::E, view(ViewKind::Side)},
+                         {"Persp", D::W, view(ViewKind::Persp)},
+                         {"Four View", D::NE, [this] { viewport_->setQuadView(true); }},
+                         {"Frame All", D::SE, [this] { viewport_->frameAll(); }},
+                         {"Frame Selected", D::SW, [this] { viewport_->frameSelected(); }}},
+                        "Views");
+        marking_->release(g); // stays open as a click menu
+    });
+    connect(scene_, &Scene::toolChanged, this, [this] {
+        Tool t = scene_->tool();
+        if (t != Tool::Select && t != Tool::Move && t != Tool::Rotate && t != Tool::Scale) lastSpecialTool_ = t;
+    });
 
     connect(&scene_->undo, &QUndoStack::cleanChanged, this, &MainWindow::updateTitle);
     connect(scene_, &Scene::modeChanged, this, [this] {
@@ -105,6 +126,7 @@ QAction* MainWindow::addAct(QMenu* menu, const QString& text, const QList<QKeySe
     });
     if (menu) menu->addAction(a);
     addAction(a); // shortcuts work even when the menu bar is hidden
+    if (hotkeys_) hotkeys_->registerAction(a, menu ? menu->title() : QString("Tools"));
     return a;
 }
 
@@ -156,6 +178,8 @@ void MainWindow::buildMenus()
     redo->setShortcuts({QKeySequence("Ctrl+Shift+Z"), QKeySequence("Shift+Z"), QKeySequence("Ctrl+Y")});
     edit->addAction(undo);
     edit->addAction(redo);
+    hotkeys_->registerAction(undo, "Edit");
+    hotkeys_->registerAction(redo, "Edit");
     addAction(undo);
     addAction(redo);
     addAct(edit, "Repeat Last", {QKeySequence("G")}, [this] {
@@ -236,7 +260,8 @@ void MainWindow::buildMenus()
     toolGroup_ = new QActionGroup(this);
     const char* toolNames[] = {"&Select Tool", "&Move Tool", "&Rotate Tool", "S&cale Tool", "Insert &Edge Loop Tool", "&Multi-Cut Tool",
                                "&Target Weld Tool", "&Quad Draw Tool", "Scu&lpt Tool"};
-    const char* toolKeys[] = {"Q", "W", "E", "R", "", "", "", "", ""};
+    // Q W E R like Maya; the newer tools get Ctrl+Shift/Ctrl+Alt bindings (rebind in the Hotkey Editor).
+    const char* toolKeys[] = {"Q", "W", "E", "R", "Ctrl+Shift+L", "Ctrl+Shift+X", "Ctrl+Shift+W", "Ctrl+Shift+Q", "Ctrl+Alt+S"};
     for (int i = 0; i < 9; ++i) {
         Tool t = Tool(i);
         QList<QKeySequence> keys;
@@ -276,6 +301,12 @@ void MainWindow::buildMenus()
         rg->addAction(a);
         if (ao == AxisOrient::World) a->setChecked(true);
     }
+    addAct(mod, "Last Tool Used", {QKeySequence("Y")}, [this] {
+        toolActs_[int(lastSpecialTool_)]->trigger();
+        return QString("Last tool: %1").arg(HotkeyManager::cleanName(toolActs_[int(lastSpecialTool_)]->text()));
+    });
+    addAct(mod, "Increase Manipulator Size", {QKeySequence("+"), QKeySequence("=")}, [this] { viewport_->scaleManipulator(1.25f); return QString(); });
+    addAct(mod, "Decrease Manipulator Size", {QKeySequence("-")}, [this] { viewport_->scaleManipulator(0.8f); return QString(); });
     mod->addSeparator();
     addAct(mod, "&Freeze Transformations", {}, [&s] { return M::freezeTransforms(s); }, true);
     addAct(mod, "&Reset Transformations", {}, [&s] { return M::resetTransforms(s); }, true);
@@ -333,13 +364,16 @@ void MainWindow::buildMenus()
         addAct(disp, label, {}, [this, vk] { viewport_->setSingleView(vk); return QString(); });
     }
     disp->addSeparator();
+    addAct(disp, "&Isolate Select", {QKeySequence("Ctrl+1")}, [&s] { return M::toggleIsolate(s); });
     addAct(disp, "&Hide Selection", {QKeySequence("Ctrl+H")}, [&s] { return M::hideSelected(s); });
     addAct(disp, "&Show All", {QKeySequence("Shift+H")}, [&s] { return M::showAll(s); });
 
     // ---- Windows ----
     QMenu* windows = add("&Windows");
     windows->setObjectName("windowsMenu");
-    addAct(windows, "Hotkey Reference", {QKeySequence("F1")}, [this] { showHotkeys(); return QString(); });
+    QMenu* prefs = windows->addMenu("Settings/Preferences");
+    addAct(prefs, "Hotkey Editor...", {QKeySequence("F1")}, [this] { showHotkeyEditor(); return QString(); });
+    addAct(windows, "Hotkey Reference (held keys)", {}, [this] { showHotkeys(); return QString(); });
 
     // ---- Mesh ----
     QMenu* mesh = add("Mes&h");
@@ -362,7 +396,7 @@ void MainWindow::buildMenus()
     connect(keep, &QAction::toggled, this, [this](bool on) { keepFacesTogether_ = on; });
     addAct(em, "&Bevel", {QKeySequence("Ctrl+B")}, [this] { return M::bevel(*scene_, bevelOffset_, bevelSegments_, bevelRound_); }, true);
     addAct(em, "Bevel Options...", {}, [this] { bevelOptions(); return QString(); });
-    addAct(em, "B&ridge", {}, [this] { return M::bridge(*scene_, bridgeDivisions_); }, true);
+    addAct(em, "B&ridge", {QKeySequence("Ctrl+Alt+B")}, [this] { return M::bridge(*scene_, bridgeDivisions_); }, true);
     addAct(em, "Bridge Divisions...", {}, [this] {
         bool ok = false;
         int d = QInputDialog::getInt(this, "Bridge", "Divisions:", bridgeDivisions_, 0, 100, 1, &ok);
@@ -370,7 +404,7 @@ void MainWindow::buildMenus()
         return QString();
     });
     em->addSeparator();
-    addAct(em, "&Merge", {}, [this] { return M::mergeVertices(*scene_, mergeThreshold_); }, true);
+    addAct(em, "&Merge", {QKeySequence("Ctrl+Alt+M")}, [this] { return M::mergeVertices(*scene_, mergeThreshold_); }, true);
     addAct(em, "Merge Threshold...", {}, [this] {
         bool ok = false;
         double t = QInputDialog::getDouble(this, "Merge", "Distance threshold:", mergeThreshold_, 0.0, 1000, 5, &ok);
@@ -393,8 +427,8 @@ void MainWindow::buildMenus()
     QMenu* mt = add("Mesh &Tools");
     for (int i = 4; i < 8; ++i) mt->addAction(toolActs_[i]);
     mt->addSeparator();
-    addAct(mt, "Make &Live (toggle)", {}, [&s] { return M::toggleLive(s); });
-    addAct(mt, "&Conform to Live Surface", {}, [&s] { return M::conform(s); }, true);
+    addAct(mt, "Make &Live (toggle)", {QKeySequence("Ctrl+Alt+L")}, [&s] { return M::toggleLive(s); });
+    addAct(mt, "&Conform to Live Surface", {QKeySequence("Ctrl+Alt+C")}, [&s] { return M::conform(s); }, true);
     mt->addSeparator();
     QMenu* sym = mt->addMenu("&Symmetry");
     auto* symGroup = new QActionGroup(this);
@@ -414,8 +448,8 @@ void MainWindow::buildMenus()
     QMenu* md = add("Mesh &Display");
     addAct(md, "&Reverse Normals", {}, [&s] { return M::reverseNormals(s); }, true);
     md->addSeparator();
-    addAct(md, "&Soften Edge", {}, [&s] { return M::softenEdges(s); }, true);
-    addAct(md, "&Harden Edge", {}, [&s] { return M::hardenEdges(s); }, true);
+    addAct(md, "&Soften Edge", {QKeySequence("Ctrl+Alt+F")}, [&s] { return M::softenEdges(s); }, true);
+    addAct(md, "&Harden Edge", {QKeySequence("Ctrl+Alt+H")}, [&s] { return M::hardenEdges(s); }, true);
     addAct(md, "Set Normal &Angle...", {}, [this] {
         bool ok = false;
         double a = QInputDialog::getDouble(this, "Set Normal Angle", "Edges sharper than this angle become hard:", normalAngle_, 0, 180, 1, &ok);
@@ -666,7 +700,19 @@ void MainWindow::buildDocks()
 
     auto* outDock = new QDockWidget("Outliner", this);
     outDock->setObjectName("outliner");
-    outDock->setWidget(new Outliner(scene_));
+    outliner_ = new Outliner(scene_);
+    outliner_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(outliner_, &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        // Right-clicking an item selects it first (unless it is already part of the selection).
+        if (QTreeWidgetItem* it = outliner_->itemAt(pos)) {
+            uint32_t id = it->data(0, Qt::UserRole).toUInt();
+            if (!scene_->isSelected(id)) scene_->selectObjects({id}, SelectOp::Replace);
+        }
+        QMenu* m = buildOutlinerMenu();
+        m->setAttribute(Qt::WA_DeleteOnClose);
+        m->popup(outliner_->viewport()->mapToGlobal(pos));
+    });
+    outDock->setWidget(outliner_);
     addDockWidget(Qt::LeftDockWidgetArea, outDock);
     auto* cbDock = new QDockWidget("Channel Box", this);
     cbDock->setObjectName("channelBox");
@@ -705,6 +751,78 @@ void MainWindow::showMarkingMenu(int kind, QPoint g, uint32_t under)
                          true, s.mode() == m});
     };
     QString title;
+
+    // ---- tool-specific menus (like Maya's per-tool marking menus) ----
+    if (s.tool() == Tool::Sculpt && kind != 2) {
+        auto brush = [&](sculpt::Brush b, D d) {
+            items.push_back({sculpt::brushName(b), d, run([this, b] {
+                                 scene_->sculpt.brush = b;
+                                 if (brushGroup_ && int(b) < brushGroup_->actions().size()) brushGroup_->actions()[int(b)]->setChecked(true);
+                                 viewport_->update();
+                                 return QString("Sculpt brush: %1").arg(sculpt::brushName(b));
+                             }),
+                             true, s.sculpt.brush == b});
+        };
+        if (kind == 0) {
+            title = "Sculpt brushes";
+            brush(sculpt::Brush::Draw, D::N);
+            brush(sculpt::Brush::Smooth, D::S);
+            brush(sculpt::Brush::Grab, D::W);
+            brush(sculpt::Brush::Inflate, D::E);
+            brush(sculpt::Brush::Flatten, D::NE);
+            brush(sculpt::Brush::Pinch, D::NW);
+            brush(sculpt::Brush::Crease, D::SE);
+            brush(sculpt::Brush::Mask, D::SW);
+            items.push_back({"Invert Mask", D::List, run([&s] { return M::invertMask(s); })});
+            items.push_back({"Clear Mask", D::List, run([&s] { return M::clearMask(s); })});
+            items.push_back({"Brush Settings...", D::List, run([this] { sculptSettings(); return QString(); })});
+        } else {
+            title = "Sculpt options";
+            items = {{"Symmetry X", D::N, run([this] {
+                          auto* c = findChild<QComboBox*>("symmetryCombo");
+                          if (c) c->setCurrentIndex(scene_->symmetry == 0 ? 0 : 1);
+                          return QString(scene_->symmetry == 0 ? "Symmetry: object X" : "Symmetry: off");
+                      }), true, s.symmetry == 0},
+                     {"Subdivide", D::E, run([&s] { return M::smooth(s, 1); })},
+                     {"Exit Sculpt", D::S, run([this] { toolActs_[0]->trigger(); return QString(); })},
+                     {"Invert Mask", D::W, run([&s] { return M::invertMask(s); })},
+                     {"Clear Mask", D::List, run([&s] { return M::clearMask(s); })},
+                     {"Weighted Normals", D::List, run([this] { return M::setWeightedNormals(*scene_, weightPower_); })}};
+        }
+        marking_->popup(g, std::move(items), title);
+        return;
+    }
+    if (s.tool() == Tool::QuadDraw && kind == 0) {
+        title = "Retopology";
+        items = {{s.liveId ? "Clear Live" : "Make Live", D::N, run([&s] { return M::toggleLive(s); })},
+                 {"Conform", D::W, run([&s] { return M::conform(s); })},
+                 {"Exit Quad Draw", D::S, run([this] { toolActs_[0]->trigger(); return QString(); })},
+                 {"Smooth Preview", D::E, run([&s] { return M::setSmoothDisplay(s, s.lead() && s.lead()->st.smoothDisplay ? 0 : 1); })},
+                 {"Insert Edge Loop", D::NE, run([this] { toolActs_[4]->trigger(); return QString(); })},
+                 {"Target Weld", D::NW, run([this] { toolActs_[6]->trigger(); return QString(); })},
+                 {"Automatic UVs", D::List, run([&s] { return M::projectUVs(s, M::Projection::Automatic); })}};
+        marking_->popup(g, std::move(items), title);
+        return;
+    }
+    if (kind == 1 && s.selection().empty()) {
+        // Shift+RMB on nothing: create polygon primitives.
+        title = "Create";
+        auto prim = [&](const QString& label, const QString& type, D d) {
+            items.push_back({label, d, run([&s, type] { return M::createPrimitive(s, type); })});
+        };
+        prim("Sphere", "polySphere", D::N);
+        prim("Cube", "polyCube", D::NE);
+        prim("Cylinder", "polyCylinder", D::E);
+        prim("Cone", "polyCone", D::SE);
+        prim("Plane", "polyPlane", D::S);
+        prim("Torus", "polyTorus", D::SW);
+        items.push_back({"Import...", D::List, run([this] {
+                             QString p = QFileDialog::getOpenFileName(this, "Import", {}, "Meshes (*.fbx *.obj)");
+                             return p.isEmpty() ? QString() : M::importFile(*scene_, p);
+                         })});
+        marking_->popup(g, std::move(items), title);
+        return;
+    }
     if (kind == 0) {
         title = under ? (s.find(under) ? s.find(under)->st.name : QString()) : QString("Scene");
         if (under) {
@@ -902,7 +1020,13 @@ void MainWindow::showHotkeys()
 <tr><td><b>MMB drag</b></td><td>Drag the last manipulator handle from anywhere</td></tr>
 <tr><td><b>X</b> / <b>J</b> held</td><td>Grid snap (move) / 15° snap (rotate)</td></tr>
 <tr><td><b>RMB</b></td><td>Component marking menu</td></tr>
-<tr><td><b>Shift + RMB</b></td><td>Modeling tools marking menu</td></tr>
+<tr><td><b>Shift + RMB</b></td><td>Modeling tools marking menu (on empty space: create primitives)</td></tr>
+<tr><td><b>RMB in Sculpt / Quad Draw</b></td><td>Brush menu / retopology menu (Shift+RMB: sculpt options)</td></tr>
+<tr><td><b>Space + click centre</b></td><td>Hotbox view menu (Top / Front / Side / Persp / Four View)</td></tr>
+<tr><td><b>Y</b></td><td>Last tool used</td></tr>
+<tr><td><b>+ / -</b></td><td>Manipulator size</td></tr>
+<tr><td><b>Ctrl+1</b></td><td>Isolate Select</td></tr>
+<tr><td><b>F1</b></td><td>Hotkey Editor (rebind anything)</td></tr>
 <tr><td><b>Ctrl + RMB</b></td><td>Convert-selection marking menu</td></tr>
 <tr><td><b>Ctrl+E</b></td><td>Extrude</td></tr>
 <tr><td><b>Ctrl+B</b></td><td>Bevel (Edit Mesh &gt; Bevel Options for offset / segments)</td></tr>
@@ -941,7 +1065,9 @@ void MainWindow::buildPluginMenus()
         for (const PluginCommand& c : lp.commands) {
             PluginCommand cmd = c;
             auto run = [this, cmd] { return plugins_->run(cmd); };
-            QAction* a = addAct(sub, cmd.label, {}, run, true);
+            QList<QKeySequence> keys;
+            if (!cmd.shortcut.isEmpty()) keys << QKeySequence(cmd.shortcut);
+            QAction* a = addAct(sub, cmd.label, keys, run, true);
             a->setToolTip(cmd.tooltip);
             if (!cmd.options.empty())
                 addAct(sub, cmd.label + " Options...", {}, [this, cmd] {
@@ -1063,6 +1189,46 @@ void MainWindow::sculptSettings()
         scene_->sculpt.strength = float(str->value());
         viewport_->update();
     }
+}
+
+QMenu* MainWindow::buildOutlinerMenu()
+{
+    Scene& s = *scene_;
+    auto* m = new QMenu(this);
+    auto act = [this, m](const QString& text, std::function<QString()> fn) {
+        QAction* a = m->addAction(text);
+        connect(a, &QAction::triggered, this, [this, fn] { report(fn()); });
+        return a;
+    };
+    const bool sel = !s.selection().empty();
+    act("Rename", [this] {
+        if (QTreeWidgetItem* it = outliner_->currentItem()) outliner_->editItem(it);
+        return QString();
+    })->setEnabled(sel);
+    act("Frame Selection", [this] { viewport_->frameSelected(); return QString(); })->setEnabled(sel);
+    act(s.isolateActive ? "Exit Isolate Select" : "Isolate Select", [&s] { return M::toggleIsolate(s); });
+    m->addSeparator();
+    act("Duplicate", [&s] { return M::duplicate(s); })->setEnabled(sel);
+    act("Delete", [&s] { s.setMode(SelectMode::Object); return M::deleteSelection(s); })->setEnabled(sel);
+    m->addSeparator();
+    act("Hide", [&s] { return M::hideSelected(s); })->setEnabled(sel);
+    act("Show All", [&s] { return M::showAll(s); });
+    m->addSeparator();
+    act(s.liveId && s.lead() && s.lead()->id == s.liveId ? "Clear Live" : "Make Live", [&s] { return M::toggleLive(s); })->setEnabled(sel || s.liveId);
+    act("Center Pivot", [&s] { return M::centerPivot(s); })->setEnabled(sel);
+    act("Freeze Transformations", [&s] { return M::freezeTransforms(s); })->setEnabled(sel);
+    act("Reset Transformations", [&s] { return M::resetTransforms(s); })->setEnabled(sel);
+    act("Delete History", [&s] { return M::deleteHistory(s); })->setEnabled(sel);
+    m->addSeparator();
+    act("Select All", [&s] { s.setMode(SelectMode::Object); return M::selectAll(s); });
+    return m;
+}
+
+void MainWindow::showHotkeyEditor()
+{
+    auto* d = new HotkeyEditor(hotkeys_, this);
+    d->setAttribute(Qt::WA_DeleteOnClose);
+    d->show();
 }
 
 void MainWindow::bevelOptions()

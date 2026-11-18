@@ -45,7 +45,17 @@ private:
         bool integer = false;
         bool regenerate = false; // construction-history input: rebuild the mesh
         QLineEdit* edit = nullptr;
+        double defaultValue = 0.0;
+        QWidget* labelWidget = nullptr;
     };
+public:
+    // Right-click menu for channel `index` (Reset to Default, Copy/Paste Value, ...). Not shown.
+    QMenu* channelMenu(int index);
+    int channelCount() const { return int(channels_.size()); }
+    QString channelLabel(int i) const { return channels_[size_t(i)].label; }
+protected:
+    void contextMenuEvent(QContextMenuEvent* e) override;
+private:
     void rebuild();
     void refresh();
     void apply(Channel& c, double value, bool undoable);

@@ -405,6 +405,21 @@ QString clearMask(Scene& s)
     return "Cleared mask";
 }
 
+QString toggleIsolate(Scene& s)
+{
+    if (s.isolateActive) {
+        s.isolateActive = false;
+        s.isolateSet.clear();
+        s.notifyObjectsChanged();
+        return "Isolate Select off";
+    }
+    if (s.selection().empty()) return "Isolate Select: select objects first";
+    s.isolateActive = true;
+    s.isolateSet = s.selection();
+    s.notifyObjectsChanged();
+    return QString("Isolated %1 object(s) — Ctrl+1 again to show everything").arg(s.isolateSet.size());
+}
+
 QString freezeTransforms(Scene& s)
 {
     auto objs = s.selectedObjects();
@@ -535,7 +550,7 @@ QString selectAll(Scene& s)
     if (s.mode() == SelectMode::Object) {
         std::vector<uint32_t> ids;
         for (auto& o : s.objects)
-            if (o->st.visible) ids.push_back(o->id);
+            if (s.isShown(o.get())) ids.push_back(o->id);
         s.selectObjects(ids, SelectOp::Replace);
         return QString("Selected %1 objects").arg(ids.size());
     }
@@ -555,7 +570,7 @@ QString invertSelection(Scene& s)
     if (s.mode() == SelectMode::Object) {
         std::vector<uint32_t> ids;
         for (auto& o : s.objects)
-            if (o->st.visible && !s.isSelected(o->id)) ids.push_back(o->id);
+            if (s.isShown(o.get()) && !s.isSelected(o->id)) ids.push_back(o->id);
         s.selectObjects(ids, SelectOp::Replace);
         return "Inverted selection";
     }

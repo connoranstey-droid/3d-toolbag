@@ -1,6 +1,10 @@
 #include "ui/ChannelBox.h"
 
+#include <QApplication>
+#include <QClipboard>
+#include <QContextMenuEvent>
 #include <QDoubleValidator>
+#include <QMenu>
 #include <QFormLayout>
 #include <QMouseEvent>
 #include <QScrollArea>
@@ -97,6 +101,8 @@ void ChannelBox::addChannel(Channel c)
     label->setToolTip("Drag to scrub (virtual slider)");
     auto* edit = new QLineEdit;
     edit->setValidator(new QDoubleValidator(edit));
+    edit->setContextMenuPolicy(Qt::NoContextMenu); // the channel menu replaces the text-edit menu
+    c.labelWidget = label;
     edit->setMaximumWidth(110);
     c.edit = edit;
     channels_.push_back(std::move(c));
@@ -151,12 +157,15 @@ void ChannelBox::rebuild()
     vecChan("Translate", &ObjectState::translate, 0.01);
     vecChan("Rotate", &ObjectState::rotate, 0.5);
     vecChan("Scale", &ObjectState::scale, 0.01);
+    for (int i = 6; i < 9; ++i) channels_[size_t(i)].defaultValue = 1.0;
     addChannel({"Visibility", [](const ObjectState& s) { return s.visible ? 1.0 : 0.0; },
                 [](ObjectState& s, double v) { s.visible = v > 0.5; }, 1, true});
+    channels_.back().defaultValue = 1.0;
 
     addSection("SHAPES  " + lead->st.name + "Shape");
     addChannel({"Smooth Level", [](const ObjectState& s) { return double(s.smoothLevel); },
                 [](ObjectState& s, double v) { s.smoothLevel = std::clamp(int(std::lround(v)), 0, 5); }, 1, true});
+    channels_.back().defaultValue = 2.0;
     addChannel({"Smooth Display", [](const ObjectState& s) { return double(s.smoothDisplay); },
                 [](ObjectState& s, double v) { s.smoothDisplay = std::clamp(int(std::lround(v)), 0, 2); }, 1, true});
 
@@ -178,10 +187,55 @@ void ChannelBox::rebuild()
             c.step = integer ? 1 : 0.01;
             c.integer = integer;
             c.regenerate = true;
+            c.defaultValue = defaultPrimitive(type).get(n, value);
             addChannel(std::move(c));
         }
     }
     refresh();
+}
+
+QMenu* ChannelBox::channelMenu(int index)
+{
+    auto* m = new QMenu(this);
+    if (index < 0 || index >= int(channels_.size())) return m;
+    const size_t i = size_t(index);
+    m->addAction(QString("Reset %1 to Default (%2)").arg(channels_[i].label).arg(channels_[i].defaultValue), this,
+                 [this, i] { apply(channels_[i], channels_[i].defaultValue, true); });
+    m->addAction("Copy Value", this, [this, i] {
+        if (SceneObject* o = scene_->lead()) QApplication::clipboard()->setText(QString::number(channels_[i].get(o->st), 'g', 9));
+    });
+    QAction* paste = m->addAction("Paste Value", this, [this, i] {
+        bool ok = false;
+        double v = QApplication::clipboard()->text().trimmed().toDouble(&ok);
+        if (ok) apply(channels_[i], v, true);
+    });
+    bool ok = false;
+    QApplication::clipboard()->text().trimmed().toDouble(&ok);
+    paste->setEnabled(ok);
+    m->addSeparator();
+    m->addAction("Reset All Transforms", this, [this] {
+        std::vector<std::pair<uint32_t, ObjectState>> before;
+        for (SceneObject* o : scene_->selectedObjects()) {
+            before.emplace_back(o->id, o->st);
+            o->st.translate = {};
+            o->st.rotate = {};
+            o->st.scale = {1, 1, 1};
+        }
+        scene_->pushStates(before, "Reset Transformations");
+    });
+    return m;
+}
+
+void ChannelBox::contextMenuEvent(QContextMenuEvent* e)
+{
+    QWidget* w = childAt(e->pos());
+    for (size_t i = 0; w && i < channels_.size(); ++i)
+        if (channels_[i].labelWidget == w || channels_[i].edit == w || (channels_[i].edit && channels_[i].edit->isAncestorOf(w))) {
+            QMenu* m = channelMenu(int(i));
+            m->setAttribute(Qt::WA_DeleteOnClose);
+            m->popup(e->globalPos());
+            return;
+        }
 }
 
 void ChannelBox::refresh()

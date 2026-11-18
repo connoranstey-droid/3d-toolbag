@@ -217,7 +217,7 @@ void Viewport::frameAll(bool allViews)
 {
     AABB box;
     for (auto& o : scene_->objects)
-        if (o->st.visible) box.expand(o->mesh().bounds().transformed(o->worldMatrix()));
+        if (scene_->isShown(o.get())) box.expand(o->mesh().bounds().transformed(o->worldMatrix()));
     if (!box.valid()) { box.expand({-6, -1, -6}); box.expand({6, 1, 6}); }
     for (int s : (allViews ? std::vector<int>{0, 1, 2, 3} : std::vector<int>{active_})) {
         QRect r = slotRect(s);
@@ -405,7 +405,7 @@ void Viewport::drawHud(QPainter& p)
         uint64_t v[3] = {}, e[3] = {}, fc[3] = {}, t[3] = {}, dt = 0;
         bool smoothAny = false;
         for (auto& o : scene_->objects) {
-            if (!o->st.visible) continue;
+            if (!scene_->isShown(o.get())) continue;
             const Mesh& m = o->mesh();
             bool sel = scene_->isSelected(o->id);
             uint64_t tris = m.triangleCount();
@@ -614,7 +614,7 @@ uint32_t Viewport::pickVertex(int slot, QPoint p, SceneObject*& obj)
         // Off-surface fallback (silhouettes, floating smooth-preview cage): nearest projected vertex.
         best = 9.0f;
         for (SceneObject* o : scene_->selectedObjects()) {
-            if (!o->st.visible) continue;
+            if (!scene_->isShown(o)) continue;
             Mat4 w = o->worldMatrix();
             const Mesh& m = o->mesh();
             for (uint32_t v = 0; v < m.numVerts(); ++v) {
@@ -707,7 +707,7 @@ void Viewport::marqueeSelect(int slot, QRect r, SelectOp op)
         if (through) {
             // In wireframe also catch objects whose projected bounds intersect the box.
             for (auto& o : scene_->objects) {
-                if (!o->st.visible || seen.count(o->id)) continue;
+                if (!scene_->isShown(o.get()) || seen.count(o->id)) continue;
                 AABB b = o->mesh().bounds().transformed(o->worldMatrix());
                 QRectF pr;
                 for (int i = 0; i < 8; ++i) {
@@ -762,7 +762,7 @@ void Viewport::marqueeSelect(int slot, QRect r, SelectOp op)
     };
     const QRectF rf(r);
     for (SceneObject* o : scene_->selectedObjects()) {
-        if (!o->st.visible) continue;
+        if (!scene_->isShown(o)) continue;
         const Mesh& m = o->mesh();
         Mat4 w = o->worldMatrix();
         std::vector<uint32_t> picked;
@@ -843,7 +843,7 @@ bool Viewport::gizmoFrame(int slot, GizmoFrame& f) const
     const Camera& c = cams_[size_t(slot)];
     QRect r = slotRect(slot);
     float depth = std::max(c.nearClip() * 2, dot(f.origin - c.eye(), c.forward()));
-    f.size = 95.0f * c.worldPerPixel(float(r.height()), depth);
+    f.size = 95.0f * gizmoScale_ * c.worldPerPixel(float(r.height()), depth);
     return true;
 }
 

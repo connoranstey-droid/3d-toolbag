@@ -586,7 +586,7 @@ void Renderer::drawScene(Scene& scene, const ViewParams& vp, const DrawOptions& 
 {
     std::vector<SceneObject*> visible;
     for (auto& o : scene.objects)
-        if (o->st.visible) {
+        if (scene.isShown(o.get())) {
             syncObject(scene, *o);
             visible.push_back(o.get());
         }
@@ -742,7 +742,7 @@ void Renderer::drawPick(Scene& scene, const ViewParams& vp, bool selectedOnly)
     glDepthFunc(GL_LESS);
     glDisable(GL_BLEND);
     for (auto& o : scene.objects) {
-        if (!o->st.visible) continue;
+        if (!scene.isShown(o.get())) continue;
         if (selectedOnly && !scene.isSelected(o->id)) continue;
         syncObject(scene, *o);
         GpuMesh* g = gpu(o->id);

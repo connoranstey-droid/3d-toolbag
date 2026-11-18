@@ -23,6 +23,16 @@ UVCanvas::UVCanvas(Scene* scene, QWidget* parent) : QWidget(parent), scene_(scen
     auto refresh = [this] { update(); };
     connect(scene_, &Scene::sceneChanged, this, refresh);
     connect(scene_, &Scene::selectionChanged, this, refresh);
+    mm_ = new MarkingMenu(this);
+}
+
+void UVCanvas::selectAllUVs()
+{
+    for (SceneObject* o : objects()) {
+        o->sel.uvs.resize(o->mesh().uvs.size());
+        for (uint32_t u = 0; u < o->sel.uvs.size(); ++u) o->sel.uvs[u] = u;
+    }
+    scene_->notifySelectionChanged();
 }
 
 QPointF UVCanvas::toScreen(Vec2 uv) const
@@ -139,7 +149,7 @@ void UVCanvas::paintEvent(QPaintEvent*)
     }
     p.setPen(QColor(200, 200, 200));
     static const char* tools[] = {"Move (W)", "Rotate (E)", "Scale (R)"};
-    p.drawText(8, height() - 8, QString("%1 · %2 · MMB-drag transforms · Alt+MMB pan · wheel zoom · F frame")
+    p.drawText(8, height() - 8, QString("%1 · %2 · RMB / Shift+RMB menus · MMB-drag transforms · Alt+MMB pan · wheel zoom · F frame")
                                     .arg(mode == Mode::UV ? "UV" : "UV Shell", tools[int(xtool)]));
     if (objects().empty()) {
         p.setPen(QColor(220, 200, 120));
@@ -256,6 +266,13 @@ void UVCanvas::mousePressEvent(QMouseEvent* e)
     const bool alt = e->modifiers() & Qt::AltModifier;
     if (alt && e->button() == Qt::MiddleButton) { drag_ = Drag::Pan; return; }
     if (alt && e->button() == Qt::RightButton) { drag_ = Drag::Zoom; return; }
+    if (e->button() == Qt::RightButton && markingItems) {
+        QString title;
+        auto items = markingItems((e->modifiers() & Qt::ShiftModifier) ? 1 : 0, title);
+        mm_->popup(e->globalPosition().toPoint(), std::move(items), title);
+        drag_ = Drag::Menu;
+        return;
+    }
     if (e->button() == Qt::MiddleButton) { beginXform(press_); return; }
     if (e->button() == Qt::LeftButton) {
         // LMB on a selected uv (or inside a selected shell) drags it; otherwise select.
@@ -281,6 +298,7 @@ void UVCanvas::mouseMoveEvent(QMouseEvent* e)
     case Drag::Zoom: zoom_ = std::clamp(zoom_ * std::exp(float(d.x() - d.y()) * 0.01f), 5.0f, 1e6f); update(); break;
     case Drag::Marquee: last_ = p; update(); break;
     case Drag::Xform: applyXform(p); break;
+    case Drag::Menu: mm_->track(e->globalPosition().toPoint()); break;
     default: break;
     }
     last_ = p;
@@ -296,6 +314,10 @@ void UVCanvas::mouseReleaseEvent(QMouseEvent* e)
         else select({}, op, true, QRectF(QRect(press_, p).normalized()));
     } else if (drag_ == Drag::Xform) {
         endXform();
+    } else if (drag_ == Drag::Menu) {
+        drag_ = Drag::None;
+        mm_->release(e->globalPosition().toPoint());
+        return;
     }
     drag_ = Drag::None;
     update();
@@ -370,6 +392,8 @@ UVEditor::UVEditor(Scene* scene, std::function<void(const QString&)> report, QWi
     auto* modes = new QActionGroup(this);
     QAction* uvMode = tb->addAction("UV");
     QAction* shellMode = tb->addAction("Shell");
+    modeActs_[0] = uvMode;
+    modeActs_[1] = shellMode;
     for (QAction* a : {uvMode, shellMode}) { a->setCheckable(true); modes->addAction(a); }
     uvMode->setChecked(true);
     connect(uvMode, &QAction::triggered, this, [this] { canvas_->mode = UVCanvas::Mode::UV; canvas_->update(); });
@@ -382,6 +406,7 @@ UVEditor::UVEditor(Scene* scene, std::function<void(const QString&)> report, QWi
         a->setCheckable(true);
         a->setChecked(i == 0);
         tools->addAction(a);
+        toolActs_[i] = a;
         connect(a, &QAction::triggered, this, [this, i] { canvas_->xtool = UVCanvas::XTool(i); canvas_->update(); });
     }
     tb->addSeparator();
@@ -402,6 +427,45 @@ UVEditor::UVEditor(Scene* scene, std::function<void(const QString&)> report, QWi
     add("Rot 90", "Rotate selected shells 90°", [&s] { return M::rotateUVs(s, 90.0f); });
     tb->addSeparator();
     add("Frame", "Frame all UVs (A); F frames the selection", [this] { canvas_->frame(false); return QString(); });
+    // Marking menus: RMB = selection mode / transform / shell ops, Shift+RMB = projections.
+    canvas_->markingItems = [this, &s, report](int kind, QString& title) {
+        using D = MarkingMenu::Dir;
+        auto run = [this, report](std::function<QString()> f) {
+            return [this, report, f] {
+                QString m = f();
+                if (report) report(m);
+                canvas_->update();
+            };
+        };
+        std::vector<MarkingMenu::Item> items;
+        if (kind == 0) {
+            title = "UV";
+            items = {{"UV", D::N, run([this] { modeActs_[0]->trigger(); return QString("UV selection"); }), true, canvas_->mode == UVCanvas::Mode::UV},
+                     {"UV Shell", D::S, run([this] { modeActs_[1]->trigger(); return QString("UV shell selection"); }), true, canvas_->mode == UVCanvas::Mode::Shell},
+                     {"Move", D::W, run([this] { toolActs_[0]->trigger(); return QString(); }), true, canvas_->xtool == UVCanvas::XTool::Move},
+                     {"Rotate", D::E, run([this] { toolActs_[1]->trigger(); return QString(); }), true, canvas_->xtool == UVCanvas::XTool::Rotate},
+                     {"Scale", D::SE, run([this] { toolActs_[2]->trigger(); return QString(); }), true, canvas_->xtool == UVCanvas::XTool::Scale},
+                     {"Frame All", D::NE, run([this] { canvas_->frame(false); return QString(); })},
+                     {"Select All UVs", D::NW, run([this] { canvas_->selectAllUVs(); return QString("Selected all UVs"); })},
+                     {"Unfold", D::SW, run([&s] { return M::unfoldUVs(s); })},
+                     {"Layout", D::List, run([&s] { return M::layoutUVs(s); })},
+                     {"Cut UV Edges", D::List, run([&s] { return M::cutUVs(s); })},
+                     {"Move and Sew", D::List, run([&s] { return M::sewUVs(s); })},
+                     {"Normalize", D::List, run([&s] { return M::normalizeUVs(s); })}};
+        } else {
+            title = "Projections";
+            items = {{"Planar", D::N, run([&s] { return M::projectUVs(s, M::Projection::PlanarBest); })},
+                     {"Cylindrical", D::W, run([&s] { return M::projectUVs(s, M::Projection::Cylindrical); })},
+                     {"Spherical", D::E, run([&s] { return M::projectUVs(s, M::Projection::Spherical); })},
+                     {"Automatic", D::S, run([&s] { return M::projectUVs(s, M::Projection::Automatic); })},
+                     {"Flip U", D::NE, run([&s] { return M::flipUVs(s, true); })},
+                     {"Flip V", D::NW, run([&s] { return M::flipUVs(s, false); })},
+                     {"Rotate 90°", D::SE, run([&s] { return M::rotateUVs(s, 90.0f); })},
+                     {"Unfold", D::List, run([&s] { return M::unfoldUVs(s); })},
+                     {"Layout", D::List, run([&s] { return M::layoutUVs(s); })}};
+        }
+        return items;
+    };
     checker_ = tb->addAction("Checker");
     checker_->setCheckable(true);
     checker_->setToolTip("Show a UV checker in the viewport (6)");

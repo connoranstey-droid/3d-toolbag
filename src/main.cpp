@@ -1,12 +1,15 @@
 #include "scene/Modeling.h"
 #include "ui/MainWindow.h"
 #include "ui/PluginManager.h"
+#include "ui/MarkingMenu.h"
+#include "ui/Hotkeys.h"
 #include "mesh/MeshOps.h"
 #include "mesh/Sculpt.h"
 #include "viewport/Viewport.h"
 
 #include <QApplication>
 #include <QPainter>
+#include <QMouseEvent>
 #include <QCommandLineParser>
 #include <QStyleFactory>
 #include <QSurfaceFormat>
@@ -240,7 +243,8 @@ int main(int argc, char** argv)
     QCommandLineOption demo("demo", "Open with a demo scene (variant: default, faces, soft).", "variant");
     QCommandLineOption shot("screenshot", "Render the demo scene to an image and exit.", "file");
     QCommandLineOption quad("quad", "Start in four-view layout.");
-    cli.addOptions({demo, shot, quad});
+    QCommandLineOption show("show", "With --screenshot: also open 'hotkeys' (Hotkey Editor) or 'menu' (RMB marking menu).", "what");
+    cli.addOptions({demo, shot, quad, show});
     cli.addPositionalArgument("scene", "A .facet scene or .obj file to open.");
     cli.process(app);
 
@@ -259,14 +263,35 @@ int main(int argc, char** argv)
 
     if (cli.isSet(shot)) {
         QString file = cli.value(shot);
-        QTimer::singleShot(900, &w, [&w, file] {
+        const QString what = cli.value(show);
+        if (what == "menu")
+            QTimer::singleShot(600, &w, [&w] {
+                // Simulate an RMB press in the middle of the viewport (opens the tool's marking menu).
+                QPoint c(w.viewport()->width() / 2, w.viewport()->height() / 2);
+                QMouseEvent e(QEvent::MouseButtonPress, QPointF(c), QPointF(w.viewport()->mapToGlobal(c)), Qt::RightButton, Qt::RightButton, {});
+                QApplication::sendEvent(w.viewport(), &e);
+                QMouseEvent m(QEvent::MouseMove, QPointF(c + QPoint(0, -60)), QPointF(w.viewport()->mapToGlobal(c + QPoint(0, -60))), Qt::NoButton,
+                              Qt::RightButton, {});
+                QApplication::sendEvent(w.viewport(), &m);
+            });
+        if (what == "hotkeys") QTimer::singleShot(600, &w, [&w] { w.showHotkeyEditor(); });
+        QTimer::singleShot(900, &w, [&w, file, what] {
             // QWidget::grab() re-renders GL widgets without their QPainter overlay, so composite
             // the viewport's own framebuffer (which includes the HUD) over the window grab.
             QPixmap shot = w.grab();
             QImage vp = w.viewport()->grabFramebuffer();
             QPainter p(&shot);
             p.drawImage(QRect(w.viewport()->mapTo(&w, QPoint(0, 0)), w.viewport()->size()), vp);
+            // Overlays (marking menus, hotbox) sit above the GL viewport: paint them last.
+            for (QWidget* ov : w.findChildren<MarkingMenu*>())
+                if (ov->isVisible()) ov->render(&p, ov->mapTo(&w, QPoint(0, 0)), QRegion(), QWidget::DrawChildren);
             p.end();
+            if (what == "hotkeys")
+                if (auto* ed = w.findChild<HotkeyEditor*>()) {
+                    QString f2 = file;
+                    f2.insert(f2.lastIndexOf('.'), "-hotkeys");
+                    ed->grab().save(f2);
+                }
             shot.save(file);
             if (QWidget* uvw = w.uvEditorWindow(); uvw && uvw->isVisible()) {
                 QString f2 = file;

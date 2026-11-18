@@ -171,6 +171,27 @@ Benchmark (`facet_plugintests`), Automatic → Smart Unwrap:
 ![uv editor](docs/uv.png)
 ![retopology](docs/retopo.png)
 
+**Menus and hotkeys**
+- **Marking menus** depend on the tool and selection, as in Maya:
+  - **Viewport:** RMB for components, Shift+RMB for modeling tools for the current mode (on empty
+    space: create primitives), Ctrl+RMB to convert the selection.
+  - **Sculpt tool:** RMB picks a brush (Draw N, Smooth S, Grab W, Inflate E, ...); Shift+RMB gives
+    sculpt options (symmetry, mask, subdivide).
+  - **Quad Draw:** RMB opens a retopology menu.
+  - **UV Editor:** RMB sets the selection mode, transform tool and shell ops; Shift+RMB opens
+    projections.
+  - **Hotbox:** hold Space and click the centre zone for the view menu.
+- **Right-click context menus:**
+  - **Outliner:** rename, frame, isolate, duplicate, delete, hide/show, make live, center pivot,
+    freeze/reset, delete history.
+  - **Channel Box channels:** reset to default, copy/paste value, reset all transforms.
+- **Hotkey Editor** (F1, or Windows > Settings/Preferences): every menu, tool and plugin command
+  is searchable and rebindable. Conflicts are reassigned with a warning, and you can reset one
+  command or all. Only changes from the defaults are saved (QSettings).
+
+![marking menu](docs/marking-menu.png)
+![hotkey editor](docs/hotkey-editor.png)
+
 **Maya-style interaction**
 
 | Input | Action |
@@ -195,6 +216,12 @@ Benchmark (`facet_plugintests`), Automatic → Smart Unwrap:
 | 6 | UV checker display |
 | Ctrl+Shift+U | UV Editor (inside it: W/E/R, F, A, Alt+MMB pan, wheel zoom) |
 | Ctrl+I | Import FBX / OBJ |
+| Y / + / - | Last tool used / manipulator size |
+| Ctrl+1 | Isolate Select |
+| Ctrl+Shift+L / X / W / Q, Ctrl+Alt+S | Insert Loop, Multi-Cut, Target Weld, Quad Draw, Sculpt tools |
+| Ctrl+Alt+B / M / H / F | Bridge, Merge, Harden Edge, Soften Edge |
+| Ctrl+Alt+L / C / U | Make Live, Conform, Smart Unwrap |
+| F1 | Hotkey Editor |
 | Sculpt tool | drag = brush, Shift = smooth, Ctrl = invert, B+drag radius, M+drag strength |
 | G | Repeat last command |
 | 1 / 2 / 3, PgUp / PgDn | Smooth preview off / cage + smooth / smooth, smooth level |
