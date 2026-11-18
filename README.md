@@ -185,6 +185,16 @@ Benchmark (`facet_plugintests`), Automatic → Smart Unwrap:
   - **Outliner:** rename, frame, isolate, duplicate, delete, hide/show, make live, center pivot,
     freeze/reset, delete history.
   - **Channel Box channels:** reset to default, copy/paste value, reset all transforms.
+- **Keyboard camera** (View menu, rebindable): Alt+Arrows orbit (pan in ortho views),
+  Alt+Shift+Arrows pan, Alt+PgUp/PgDn zoom, Alt+Home reset. Numpad 7/1/3/5 give the
+  top/front/side/persp views; Numpad 8/2/4/6 orbit and Numpad +/− zoom. None use Ctrl+Alt+Arrow,
+  which rotates the whole screen on many Windows laptops.
+- **UK keyboards:** Windows reports AltGr as Ctrl+Alt (and UK Extended types á é í ó ú with it),
+  so the **UK (AltGr-safe)** hotkey set moves every Ctrl+Alt default to Ctrl+Shift:
+  Sculpt Ctrl+Shift+B, Make Live Ctrl+Shift+V, Conform Ctrl+Shift+C, Smart Unwrap Ctrl+Shift+N,
+  Bridge Ctrl+Shift+R, Merge Ctrl+Shift+M, Harden Ctrl+Shift+H, Soften Ctrl+Shift+F.
+  It is chosen automatically on first launch when the keyboard or system locale is en-GB.
+  Switch sets at the top of the Hotkey Editor; your own bindings are kept either way.
 - **Hotkey Editor** (F1, or Windows > Settings/Preferences): every menu, tool and plugin command
   is searchable and rebindable. Conflicts are reassigned with a warning, and you can reset one
   command or all. Only changes from the defaults are saved (QSettings).
@@ -217,10 +227,12 @@ Benchmark (`facet_plugintests`), Automatic → Smart Unwrap:
 | Ctrl+Shift+U | UV Editor (inside it: W/E/R, F, A, Alt+MMB pan, wheel zoom) |
 | Ctrl+I | Import FBX / OBJ |
 | Y / + / - | Last tool used / manipulator size |
+| Alt+Arrows / Alt+Shift+Arrows / Alt+PgUp,PgDn / Alt+Home | Orbit / pan / zoom / reset view (keyboard camera) |
+| Numpad 7 / 1 / 3 / 5 | Top / front / side / perspective view |
 | Ctrl+1 | Isolate Select |
 | Ctrl+Shift+L / X / W / Q, Ctrl+Alt+S | Insert Loop, Multi-Cut, Target Weld, Quad Draw, Sculpt tools |
-| Ctrl+Alt+B / M / H / F | Bridge, Merge, Harden Edge, Soften Edge |
-| Ctrl+Alt+L / C / U | Make Live, Conform, Smart Unwrap |
+| Ctrl+Alt+B / M / H / F | Bridge, Merge, Harden Edge, Soften Edge (UK set: Ctrl+Shift+R / M / H / F) |
+| Ctrl+Alt+L / C / U | Make Live, Conform, Smart Unwrap (UK set: Ctrl+Shift+V / C / N; Sculpt Ctrl+Shift+B) |
 | F1 | Hotkey Editor |
 | Sculpt tool | drag = brush, Shift = smooth, Ctrl = invert, B+drag radius, M+drag strength |
 | G | Repeat last command |

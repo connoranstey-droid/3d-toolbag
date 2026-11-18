@@ -28,6 +28,11 @@ public:
     void frameSelected(bool allViews = false);
     void frameAll(bool allViews = false);
     void cycleBackground();
+    // Keyboard camera control (active view). Ortho views pan instead of orbiting.
+    void orbitView(float dAzimuthDeg, float dElevationDeg);
+    void panView(float fx, float fy); // fractions of the view height
+    void zoomView(float steps);       // + = closer
+    void resetView();
     // Maya's +/- manipulator size.
     void scaleManipulator(float factor) { gizmoScale_ = std::clamp(gizmoScale_ * factor, 0.25f, 4.0f); update(); }
     float manipulatorScale() const { return gizmoScale_; }

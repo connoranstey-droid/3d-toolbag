@@ -179,6 +179,39 @@ void Viewport::setSingleView(ViewKind k)
     update();
 }
 
+void Viewport::orbitView(float dAz, float dEl)
+{
+    Camera& c = cams_[size_t(active_)];
+    if (c.ortho()) {
+        panView(-dAz / 90.0f, dEl / 90.0f); // arrows still move something useful in ortho views
+        return;
+    }
+    // Camera::tumble works in pixels at 0.3 deg/px.
+    c.tumble(-dAz / 0.3f, dEl / 0.3f);
+    update();
+}
+
+void Viewport::panView(float fx, float fy)
+{
+    Camera& c = cams_[size_t(active_)];
+    const float h = float(slotRect(active_).height());
+    c.track(fx * h, fy * h, h);
+    update();
+}
+
+void Viewport::zoomView(float steps)
+{
+    cams_[size_t(active_)].dolly(steps * 0.15f);
+    update();
+}
+
+void Viewport::resetView()
+{
+    Camera& c = cams_[size_t(active_)];
+    c = Camera::make(c.kind);
+    frameAll(false);
+}
+
 void Viewport::cycleBackground()
 {
     bgIndex_ = (bgIndex_ + 1) % int(std::size(kBackgrounds));

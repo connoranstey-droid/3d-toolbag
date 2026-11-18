@@ -553,6 +553,57 @@ int main(int argc, char** argv)
     }
     std::printf("%s hotkeys + editor\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
 
+    // ---- keyboard camera + UK (AltGr-safe) hotkey set ----
+    {
+        vp->setSingleView(ViewKind::Persp);
+        Camera& cam = vp->activeCamera();
+        float az = cam.azimuth, el = cam.elevation;
+        key(vp, Qt::Key_Left, Qt::AltModifier);
+        CHECK(std::abs(cam.azimuth - (az + 15.0f)) < 1e-3f || std::abs(cam.azimuth - (az - 15.0f)) < 1e-3f);
+        key(vp, Qt::Key_Up, Qt::AltModifier);
+        CHECK(std::abs(cam.elevation - el) > 1.0f);
+        Vec3 coi = cam.coi;
+        key(vp, Qt::Key_Right, Qt::AltModifier | Qt::ShiftModifier);
+        CHECK(length(cam.coi - coi) > 1e-4f);
+        float dist = cam.distance;
+        key(vp, Qt::Key_PageUp, Qt::AltModifier);
+        CHECK(cam.distance < dist);
+        key(vp, Qt::Key_7, Qt::KeypadModifier); // numpad 7 = top view
+        CHECK(vp->activeCamera().kind == ViewKind::Top);
+        key(vp, Qt::Key_5, Qt::KeypadModifier);
+        CHECK(vp->activeCamera().kind == ViewKind::Persp);
+        key(vp, Qt::Key_Home, Qt::AltModifier);
+        CHECK(std::abs(vp->activeCamera().azimuth - 45.0f) < 1e-3f);
+
+        HotkeyManager* hk = w.hotkeyManager();
+        auto shortcutOf = [&](const QString& id) {
+            auto* e = hk->find(id);
+            return e && e->action ? e->action->shortcut().toString(QKeySequence::PortableText) : QString("<missing>");
+        };
+        hk->assign("Edit/Duplicate", QKeySequence("Ctrl+J")); // a user override that must survive set changes
+        hk->setPreset("UK");
+        CHECK(shortcutOf("Smart Unwrap/Smart Unwrap") == "Ctrl+Shift+N");
+        CHECK(shortcutOf("Tools/Sculpt Tool") == "Ctrl+Shift+B");
+        CHECK(shortcutOf("Edit/Duplicate") == "Ctrl+J");
+        // No Ctrl+Alt bindings left in the UK set.
+        int ctrlAlt = 0;
+        for (const auto& e : hk->entries())
+            if (e.action)
+                for (const auto& k : e.action->shortcuts())
+                    if ((k[0].keyboardModifiers() & (Qt::ControlModifier | Qt::AltModifier)) == (Qt::ControlModifier | Qt::AltModifier)) ++ctrlAlt;
+        CHECK(ctrlAlt == 0);
+        CHECK(QSettings().value("hotkeyPreset").toString() == "UK");
+        s.clear();
+        M::createPrimitive(s, "polySphere");
+        key(vp, Qt::Key_V, Qt::ControlModifier | Qt::ShiftModifier); // Make Live in the UK set
+        CHECK(s.liveId != 0);
+        hk->setPreset("Default");
+        CHECK(shortcutOf("Smart Unwrap/Smart Unwrap") == "Ctrl+Alt+U" && shortcutOf("Edit/Duplicate") == "Ctrl+J");
+        hk->resetAll();
+        s.liveId = 0;
+    }
+    std::printf("%s keyboard camera + UK hotkey set\n", (g_fail == g_mark ? "PASS" : "FAIL")); g_mark = g_fail;
+
     // ---- isolate select (Ctrl+1) ----
     {
         s.clear();

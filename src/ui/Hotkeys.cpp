@@ -1,6 +1,10 @@
 #include "ui/Hotkeys.h"
 
 #include <QAction>
+#include <QComboBox>
+#include <QGuiApplication>
+#include <QInputMethod>
+#include <QLocale>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeySequenceEdit>
@@ -23,6 +27,65 @@ QString HotkeyManager::cleanName(QString text)
     text.remove('&');
     text.remove(QStringLiteral("..."));
     return text.trimmed();
+}
+
+namespace {
+// UK / AltGr-safe replacements for the Ctrl+Alt defaults.
+const QMap<QString, QString>& ukOverrides()
+{
+    static const QMap<QString, QString> m = {
+        {"Tools/Sculpt Tool", "Ctrl+Shift+B"},
+        {"Mesh Tools/Make Live (toggle)", "Ctrl+Shift+V"},
+        {"Mesh Tools/Conform to Live Surface", "Ctrl+Shift+C"},
+        {"Smart Unwrap/Smart Unwrap", "Ctrl+Shift+N"},
+        {"Edit Mesh/Bridge", "Ctrl+Shift+R"},
+        {"Edit Mesh/Merge", "Ctrl+Shift+M"},
+        {"Mesh Display/Harden Edge", "Ctrl+Shift+H"},
+        {"Mesh Display/Soften Edge", "Ctrl+Shift+F"},
+    };
+    return m;
+}
+} // namespace
+
+bool HotkeyManager::ukLayoutDetected()
+{
+    auto isGB = [](const QLocale& l) { return l.territory() == QLocale::UnitedKingdom; };
+    if (auto* im = QGuiApplication::inputMethod(); im && isGB(im->locale())) return true;
+    return isGB(QLocale::system());
+}
+
+QList<QKeySequence> HotkeyManager::effectiveDefaults(const Entry& e) const
+{
+    if (preset_ == "UK") {
+        auto it = ukOverrides().find(e.id);
+        if (it != ukOverrides().end()) return {QKeySequence(it.value())};
+    }
+    return e.defaults;
+}
+
+void HotkeyManager::applyDefaultsAndOverrides()
+{
+    for (auto& e : entries_)
+        if (e.action) e.action->setShortcuts(effectiveDefaults(e));
+    // User overrides on top.
+    QSettings s;
+    s.beginGroup("hotkeys");
+    for (auto& e : entries_) {
+        if (!e.action || !s.contains(e.id)) continue;
+        QList<QKeySequence> keys;
+        for (const QString& k : s.value(e.id).toStringList())
+            if (!k.isEmpty()) keys << QKeySequence::fromString(k, QKeySequence::PortableText);
+        e.action->setShortcuts(keys);
+    }
+    s.endGroup();
+}
+
+void HotkeyManager::setPreset(const QString& name)
+{
+    preset_ = presets().contains(name) ? name : QString("Default");
+    QSettings().setValue("hotkeyPreset", preset_);
+    applyDefaultsAndOverrides();
+    emit changed();
 }
 
 void HotkeyManager::registerAction(QAction* a, const QString& category)
@@ -83,14 +146,15 @@ void HotkeyManager::reset(const QString& id)
 {
     if (Entry* e = find(id); e && e->action) {
         // Defaults win over whatever currently holds the key.
-        for (const auto& seq : e->defaults)
+        const auto defs = effectiveDefaults(*e);
+        for (const auto& seq : defs)
             for (const QString& other : conflicts(seq, id)) {
                 Entry* o = find(other);
                 auto list = o->action->shortcuts();
                 list.removeAll(seq);
                 o->action->setShortcuts(list);
             }
-        e->action->setShortcuts(e->defaults);
+        e->action->setShortcuts(defs);
         save();
         emit changed();
     }
@@ -98,25 +162,18 @@ void HotkeyManager::reset(const QString& id)
 
 void HotkeyManager::resetAll()
 {
-    for (auto& e : entries_)
-        if (e.action) e.action->setShortcuts(e.defaults);
     QSettings s;
     s.remove("hotkeys");
+    applyDefaultsAndOverrides();
     emit changed();
 }
 
 void HotkeyManager::load()
 {
     QSettings s;
-    s.beginGroup("hotkeys");
-    for (auto& e : entries_) {
-        if (!e.action || !s.contains(e.id)) continue;
-        QList<QKeySequence> keys;
-        for (const QString& k : s.value(e.id).toStringList())
-            if (!k.isEmpty()) keys << QKeySequence::fromString(k, QKeySequence::PortableText);
-        e.action->setShortcuts(keys);
-    }
-    s.endGroup();
+    preset_ = s.value("hotkeyPreset", "Default").toString();
+    if (!presets().contains(preset_)) preset_ = "Default";
+    applyDefaultsAndOverrides();
 }
 
 void HotkeyManager::save() const
@@ -126,7 +183,7 @@ void HotkeyManager::save() const
     s.beginGroup("hotkeys");
     for (const auto& e : entries_) {
         if (!e.action) continue;
-        if (e.action->shortcuts() == e.defaults) { s.remove(e.id); continue; }
+        if (e.action->shortcuts() == effectiveDefaults(e)) { s.remove(e.id); continue; }
         QStringList keys;
         for (const auto& k : e.action->shortcuts()) keys << k.toString(QKeySequence::PortableText);
         s.setValue(e.id, keys);
@@ -141,6 +198,19 @@ HotkeyEditor::HotkeyEditor(HotkeyManager* mgr, QWidget* parent) : QDialog(parent
     setWindowTitle("Hotkey Editor");
     resize(760, 620);
     auto* lay = new QVBoxLayout(this);
+    auto* presetRow = new QHBoxLayout;
+    presetRow->addWidget(new QLabel("Hotkey set:"));
+    presetBox_ = new QComboBox;
+    presetBox_->addItem("Default (Maya-style)", "Default");
+    presetBox_->addItem("UK keyboard (AltGr-safe: no Ctrl+Alt)", "UK");
+    presetBox_->setCurrentIndex(mgr_->preset() == "UK" ? 1 : 0);
+    presetRow->addWidget(presetBox_, 1);
+    lay->addLayout(presetRow);
+    connect(presetBox_, &QComboBox::currentIndexChanged, this, [this](int i) {
+        mgr_->setPreset(presetBox_->itemData(i).toString());
+        status_->setText(QString("Hotkey set: %1").arg(presetBox_->currentText()));
+        rebuild();
+    });
     filter_ = new QLineEdit;
     filter_->setPlaceholderText("Search commands or keys (e.g. bevel, Ctrl+B)");
     filter_->setClearButtonEnabled(true);
@@ -175,7 +245,9 @@ HotkeyEditor::HotkeyEditor(HotkeyManager* mgr, QWidget* parent) : QDialog(parent
     bottom->addWidget(close);
     lay->addLayout(bottom);
     lay->addWidget(new QLabel("<small>Held keys in the viewport (not rebindable): Space (hotbox / four view), B (soft select / brush radius), "
-                              "M (brush strength), X (grid snap), J (rotate snap), Alt + mouse (camera).</small>"));
+                              "M (brush strength), X (grid snap), J (rotate snap), Alt + mouse (camera).<br>"
+                              "Keyboard camera (rebindable, under View): Alt+Arrows orbit, Alt+Shift+Arrows pan, Alt+PgUp/PgDn zoom, "
+                              "Alt+Home reset, Numpad 7/1/3/5 views, Numpad 8/2/4/6 orbit, Numpad +/- zoom.</small>"));
 
     connect(filter_, &QLineEdit::textChanged, this, &HotkeyEditor::rebuild);
     connect(tree_, &QTreeWidget::currentItemChanged, this, &HotkeyEditor::onSelect);
@@ -223,7 +295,7 @@ void HotkeyEditor::rebuild()
     };
     for (const auto& e : mgr_->entries()) {
         if (!e.action) continue;
-        QString cur = keys(e.action->shortcuts()), def = keys(e.defaults);
+        QString cur = keys(e.action->shortcuts()), def = keys(mgr_->effectiveDefaults(e));
         if (!f.isEmpty() && !e.name.contains(f, Qt::CaseInsensitive) && !e.category.contains(f, Qt::CaseInsensitive) &&
             !cur.contains(f, Qt::CaseInsensitive))
             continue;

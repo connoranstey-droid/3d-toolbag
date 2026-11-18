@@ -31,6 +31,7 @@
 #include <QTabWidget>
 #include <QTextBrowser>
 #include <QTimer>
+#include <QSettings>
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -71,7 +72,14 @@ MainWindow::MainWindow()
     plugins_ = new PluginManager(scene_, this);
     plugins_->loadAll();
     buildPluginMenus();
-    hotkeys_->load(); // user overrides from the Hotkey Editor
+    hotkeys_->load(); // hotkey set + user overrides from the Hotkey Editor
+    if (!QSettings().contains("hotkeyPreset") && HotkeyManager::ukLayoutDetected()) {
+        // First launch on a UK keyboard: avoid Ctrl+Alt (AltGr) defaults.
+        hotkeys_->setPreset("UK");
+        QTimer::singleShot(0, this, [this] {
+            report("UK keyboard detected: using the AltGr-safe hotkey set (change it in Windows > Settings/Preferences > Hotkey Editor)");
+        });
+    }
     connect(hotbox_, &Hotbox::centerClicked, this, [this](QPoint g) {
         using D = MarkingMenu::Dir;
         auto view = [this](ViewKind k) { return [this, k] { viewport_->setSingleView(k); }; };
@@ -367,6 +375,28 @@ void MainWindow::buildMenus()
     addAct(disp, "&Isolate Select", {QKeySequence("Ctrl+1")}, [&s] { return M::toggleIsolate(s); });
     addAct(disp, "&Hide Selection", {QKeySequence("Ctrl+H")}, [&s] { return M::hideSelected(s); });
     addAct(disp, "&Show All", {QKeySequence("Shift+H")}, [&s] { return M::showAll(s); });
+
+    // ---- View: keyboard camera (all rebindable in the Hotkey Editor) ----
+    QMenu* vm = add("&View");
+    const float step = 15.0f;
+    addAct(vm, "Orbit Left", {QKeySequence("Alt+Left"), QKeySequence("Num+4")}, [this, step] { viewport_->orbitView(-step, 0); return QString(); });
+    addAct(vm, "Orbit Right", {QKeySequence("Alt+Right"), QKeySequence("Num+6")}, [this, step] { viewport_->orbitView(step, 0); return QString(); });
+    addAct(vm, "Orbit Up", {QKeySequence("Alt+Up"), QKeySequence("Num+8")}, [this, step] { viewport_->orbitView(0, step); return QString(); });
+    addAct(vm, "Orbit Down", {QKeySequence("Alt+Down"), QKeySequence("Num+2")}, [this, step] { viewport_->orbitView(0, -step); return QString(); });
+    vm->addSeparator();
+    addAct(vm, "Pan Left", {QKeySequence("Alt+Shift+Left")}, [this] { viewport_->panView(-0.1f, 0); return QString(); });
+    addAct(vm, "Pan Right", {QKeySequence("Alt+Shift+Right")}, [this] { viewport_->panView(0.1f, 0); return QString(); });
+    addAct(vm, "Pan Up", {QKeySequence("Alt+Shift+Up")}, [this] { viewport_->panView(0, -0.1f); return QString(); });
+    addAct(vm, "Pan Down", {QKeySequence("Alt+Shift+Down")}, [this] { viewport_->panView(0, 0.1f); return QString(); });
+    vm->addSeparator();
+    addAct(vm, "Zoom In", {QKeySequence("Alt+PgUp"), QKeySequence("Num++")}, [this] { viewport_->zoomView(1); return QString(); });
+    addAct(vm, "Zoom Out", {QKeySequence("Alt+PgDown"), QKeySequence("Num+-")}, [this] { viewport_->zoomView(-1); return QString(); });
+    addAct(vm, "Reset View", {QKeySequence("Alt+Home")}, [this] { viewport_->resetView(); return QString("View reset"); });
+    vm->addSeparator();
+    addAct(vm, "Top View", {QKeySequence("Num+7")}, [this] { viewport_->setSingleView(ViewKind::Top); return QString(); });
+    addAct(vm, "Front View", {QKeySequence("Num+1")}, [this] { viewport_->setSingleView(ViewKind::Front); return QString(); });
+    addAct(vm, "Side View", {QKeySequence("Num+3")}, [this] { viewport_->setSingleView(ViewKind::Side); return QString(); });
+    addAct(vm, "Perspective View", {QKeySequence("Num+5")}, [this] { viewport_->setSingleView(ViewKind::Persp); return QString(); });
 
     // ---- Windows ----
     QMenu* windows = add("&Windows");
@@ -1003,6 +1033,11 @@ void MainWindow::showHotkeys()
 <tr><td><b>Alt + RMB</b> / wheel</td><td>Dolly</td></tr>
 <tr><td><b>F</b> / <b>A</b></td><td>Frame selected / all (Shift = all views)</td></tr>
 <tr><td><b>Space</b> tap / hold</td><td>Four-view toggle / Hotbox</td></tr>
+<tr><td><b>Alt + Arrows</b></td><td>Orbit 15° (pans in ortho views)</td></tr>
+<tr><td><b>Alt + Shift + Arrows</b></td><td>Pan</td></tr>
+<tr><td><b>Alt + PgUp / PgDn</b>, Numpad + / -</td><td>Zoom</td></tr>
+<tr><td><b>Alt + Home</b></td><td>Reset view</td></tr>
+<tr><td><b>Numpad 7 / 1 / 3 / 5</b></td><td>Top / front / side / perspective; Numpad 8/2/4/6 orbit</td></tr>
 </table>
 <h3>Selection</h3>
 <table cellpadding=3>

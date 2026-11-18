@@ -9,6 +9,7 @@
 #include <vector>
 
 class QAction;
+class QComboBox;
 class QKeySequenceEdit;
 class QLabel;
 class QLineEdit;
@@ -45,13 +46,24 @@ public:
     void load();
     void save() const;
 
+    // Hotkey sets: "Default" (Maya-like) and "UK" (AltGr-safe: no Ctrl+Alt defaults, because on a UK
+    // Windows keyboard AltGr *is* Ctrl+Alt and types characters). Switching keeps user overrides.
+    QStringList presets() const { return {"Default", "UK"}; }
+    QString preset() const { return preset_; }
+    void setPreset(const QString& name);
+    QList<QKeySequence> effectiveDefaults(const Entry& e) const;
+    // True when the keyboard / system locale is en-GB.
+    static bool ukLayoutDetected();
+
     static QString cleanName(QString text);
 
 signals:
     void changed();
 
 private:
+    void applyDefaultsAndOverrides();
     std::vector<Entry> entries_;
+    QString preset_ = "Default";
 };
 
 class HotkeyEditor : public QDialog {
@@ -66,6 +78,7 @@ private:
 
     HotkeyManager* mgr_;
     QLineEdit* filter_;
+    QComboBox* presetBox_;
     QTreeWidget* tree_;
     QKeySequenceEdit* edit_;
     QLabel* status_;
